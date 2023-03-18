@@ -4,7 +4,7 @@
 //
 //  Experimental USB EHCI adapter (partly ported from Qemu)
 //
-//  Copyright (C) 2015-2021  The Bochs Project
+//  Copyright (C) 2015-2023  The Bochs Project
 //
 //  Copyright(c) 2008  Emutex Ltd. (address@hidden)
 //  Copyright(c) 2011-2012 Red Hat, Inc.
@@ -631,8 +631,8 @@ void bx_usb_ehci_c::change_port_owner(int port)
   } else {
     usb_device_c *device = BX_EHCI_THIS hub.usb_port[port].device;
     if (BX_EHCI_THIS hub.usb_port[port].owner_change) {
-      BX_INFO(("port #%d: owner change to %s", port+1,
-               BX_EHCI_THIS hub.usb_port[port].portsc.po ? "EHCI":"UHCI"));
+      BX_INFO(("port #%d: owner change to %s", port + 1,
+               BX_EHCI_THIS hub.usb_port[port].portsc.po ? "EHCI" : "UHCI"));
       if (device != NULL) {
         set_connect_status(port, 0);
       }
@@ -750,9 +750,9 @@ bool bx_usb_ehci_c::read_handler(bx_phy_address addr, unsigned len, void *data, 
       break;
   }
 #if BX_PHY_ADDRESS_LONG
-    BX_DEBUG(("register read from offset 0x%04X:  0x%08X%08X (len=%i)", offset, (Bit32u) val_hi, (Bit32u) val, len));
+    BX_DEBUG(("register read from offset 0x%04X:  0x%08X%08X (len=%d)", offset, (Bit32u) val_hi, (Bit32u) val, len));
 #else
-    BX_DEBUG(("register read from offset 0x%04X:  0x%08X (len=%i)", offset, (Bit32u) val, len));
+    BX_DEBUG(("register read from offset 0x%04X:  0x%08X (len=%d)", offset, (Bit32u) val, len));
 #endif
 
   return 1;
@@ -778,9 +778,9 @@ bool bx_usb_ehci_c::write_handler(bx_phy_address addr, unsigned len, void *data,
   }
 
 #if BX_PHY_ADDRESS_LONG
-    BX_DEBUG(("register write to  offset 0x%04X:  0x%08X%08X (len=%i)", offset, value_hi, value, len));
+    BX_DEBUG(("register write to  offset 0x%04X:  0x%08X%08X (len=%d)", offset, value_hi, value, len));
 #else
-    BX_DEBUG(("register write to  offset 0x%04X:  0x%08X (len=%i)", offset, value, len));
+    BX_DEBUG(("register write to  offset 0x%04X:  0x%08X (len=%d)", offset, value, len));
 #endif
 
   if (offset >= OPS_REGS_OFFSET) {
@@ -1414,14 +1414,31 @@ int bx_usb_ehci_c::execute(EHCIPacket *p)
     p->packet.pid = p->pid;
     p->packet.devaddr = p->queue->dev->get_address();
     p->packet.devep = endp;
+    switch ((p->queue->qh.epchar & QH_EPCHAR_EPS_MASK) >> QH_EPCHAR_EPS_SH) {
+      case 0:
+        p->packet.speed = USB_SPEED_FULL;
+        break;
+      case 1:
+        p->packet.speed = USB_SPEED_LOW;
+        break;
+      case 2:
+        p->packet.speed = USB_SPEED_HIGH;
+        break;
+      default:
+        BX_ERROR(("Invalid speed specified in EPS field of Queue."));
+    }
+#if HANDLE_TOGGLE_CONTROL
+    p->packet.toggle = (p->queue->qh.epchar & QH_EPCHAR_DTC) ? ((p->qtd.token & QTD_TOKEN_DTOGGLE) > 0) : ((p->queue->qh.token & QTD_TOKEN_DTOGGLE) > 0);
+#endif
     p->packet.complete_cb = ehci_event_handler;
     p->packet.complete_dev = BX_EHCI_THIS_PTR;
+    p->packet.strm_pid = 0; // if UASP is used, this must be 0
 
     p->async = EHCI_ASYNC_INITIALIZED;
   }
 
   ret = p->queue->dev->handle_packet(&p->packet);
-  BX_DEBUG(("submit: qh %x next %x qtd %x pid %x len %d (total %d) endp %x ret %d\n",
+  BX_DEBUG(("submit: qh %x next %x qtd %x pid %x len %d (total %d) endp %x ret %d",
             p->queue->qhaddr, p->queue->qh.next, p->queue->qtdaddr, p->pid,
             p->packet.len, p->tbytes, endp, ret));
 
@@ -2063,7 +2080,10 @@ void bx_usb_ehci_c::advance_async_state(void)
 
     default:
       /* this should only be due to a developer mistake */
-      BX_PANIC(("Bad asynchronous state %d. Resetting to active", BX_EHCI_THIS hub.astate));
+      // Ben: I commented this line due to the fact that after a USB_RET_ASYNC return,
+      //  then a usb_packet_complete(p), the event handler is setting the astate to 
+      //  EST_EXECUTE instead of EST_ACTIVE ???
+      //BX_PANIC(("Bad asynchronous state %d. Resetting to active", BX_EHCI_THIS hub.astate));
       BX_EHCI_THIS set_state(async, EST_ACTIVE);
   }
 }

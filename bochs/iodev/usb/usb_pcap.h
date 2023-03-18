@@ -2,7 +2,7 @@
 // $Id$
 /////////////////////////////////////////////////////////////////////////
 //
-//  Copyright (C) 2005-2021  The Bochs Project
+//  Copyright (C) 2005-2023  The Bochs Project
 //
 //  This library is free software; you can redistribute it and/or
 //  modify it under the terms of the GNU Lesser General Public
@@ -92,9 +92,9 @@ struct usbmon_packet {
 class BOCHSAPI_MSVCONLY pcap_image_t
 {
   public:
-    // Default constructor
-    pcap_image_t();
+    // Uses a default constructor
     ~pcap_image_t();
+    void pcap_image_init();
 
     // append a packet to the pcap file
     int create_pcap(const char *filename);

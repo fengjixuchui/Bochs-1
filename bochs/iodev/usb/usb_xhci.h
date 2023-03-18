@@ -2,8 +2,8 @@
 // $Id$
 /////////////////////////////////////////////////////////////////////////
 //
-//  Copyright (C) 2010-2017  Benjamin D Lunt (fys [at] fysnet [dot] net)
-//                2011-2021  The Bochs Project
+//  Copyright (C) 2010-2023  Benjamin D Lunt (fys [at] fysnet [dot] net)
+//                2011-2023  The Bochs Project
 //
 //  This library is free software; you can redistribute it and/or
 //  modify it under the terms of the GNU Lesser General Public
@@ -45,17 +45,30 @@
 
 #define OPS_REGS_OFFSET   0x20
 // Change this to 0.95, 0.96, 1.00, 1.10, according to the desired effects (LINK chain bit, etc)
-//   uPD720202 is 1.00
+//   (the NEC/Renesas uPD720202 is v1.00. If you change this version and use a NEC/Renesas specific,
+//     driver the emulation may have undefined results)
+//   (also, the emulation for v1.10 is untested. I don't have a test-system that uses that version)
 #define VERSION_MAJOR     0x01
 #define VERSION_MINOR     0x00
 
 // HCSPARAMS1
 #define MAX_SLOTS           32   // (1 based)
 #define INTERRUPTERS         8   //
-#define USB_XHCI_PORTS       4   // Port Registers, each supporting USB3 or USB2 (0x08 = uPD720201, 0x04 = uPD720202)
 
-#if (USB_XHCI_PORTS != 4)
-  #error "USB_XHCI_PORTS must equal 4"
+// Each controller supports its own number of ports.
+// Note: USB_XHCI_PORTS should be defined as twice the amount of sockets wanted.
+//  ie.: Typically each physical port (socket) has two defined port register sets.  One for USB3, one for USB2.
+// Only one paired port type may be used at a time.
+// If we support two sockets, we need four ports. (In our emulation) the first half will be USB3, the last half will be USB2.
+// With a count of four, if Port1 is used, then Port3 must be vacant. If Port2 is used, then Port4 must be vacant.
+// The uPD720202 supports 2 sockets (4 port register sets).
+// The uPD720201 supports 4 sockets (8 port register sets).
+// You can change USB_XHCI_PORTS below to another value (must be an even number).
+#define USB_XHCI_PORTS       4   // Default number of port Registers, each supporting USB3 or USB2 (0x08 = uPD720201, 0x04 = uPD720202)
+#define USB_XHCI_PORTS_MAX  10   // we don't support more than this many ports
+
+#if ((USB_XHCI_PORTS < 2) || (USB_XHCI_PORTS > USB_XHCI_PORTS_MAX) || ((USB_XHCI_PORTS & 1) == 1))
+  #error "USB_XHCI_PORTS must be at least 2 and no more than USB_XHCI_PORTS_MAX and must be an even number."
 #endif
 
 // HCSPARAMS2
@@ -72,7 +85,7 @@
 #define ADDR_CAP_64              1
 #define BW_NEGOTIATION           1
 #define CONTEXT_SIZE            64  // Size of the CONTEXT blocks (32 or 64)
-#define PORT_POWER_CTRL          1
+#define PORT_POWER_CTRL          1  // 1 = port power is controlled by port register's power bit, 0 = power always on
 #define PORT_INDICATORS          0
 #define LIGHT_HC_RESET           0  // Do we support the Light HC Reset function
 #define LAT_TOL_MSGING_CAP       1  // Latency Tolerance Messaging Capability (v1.00+)
@@ -81,9 +94,15 @@
 #define SEC_DOMAIN_BAND          1  // version 0.96 and below only (MUST BE 1 in v1.00+)
 #define STOPPED_EDTLA            0
 #define CONT_FRAME_ID            0
-#define MAX_PSA_SIZE          0x05
+#define MAX_PSA_SIZE          0x05  // 2^(5+1) = 63 Primary Streams (first one is reserved)
+  #define MAX_PSA_SIZE_NUM      (1 << (MAX_PSA_SIZE + 1))
 #define EXT_CAPS_OFFSET      0x500
   #define EXT_CAPS_SIZE        144
+
+// doorbell masks
+#define PSA_MAX_SIZE_NUM(m)       (1UL << ((m) + 1))
+#define PSA_PRIMARY_MASK(d, m)    (((d) >> 16) & ((1 << ((m) + 1)) - 1))
+#define PSA_SECONDARY_MASK(d, m)  (((d) >> 16) >> ((m) + 1))
 
 // HCCPARAMS2 (v1.10+)
 #if ((VERSION_MAJOR == 1) && (VERSION_MINOR >= 0x10))
@@ -132,31 +151,41 @@
 #endif
 
 #if ((LAT_TOL_MSGING_CAP == 1) && ((VERSION_MAJOR < 1) || (VERSION_MINOR < 0)))
-#  error "LAT_TOL_MSGING_CAP must be used with in version 1.1 and above"
+#  error "LAT_TOL_MSGING_CAP must be used with in version 1.10 and above"
 #endif
 
 #if ((NO_SSD_SUPPORT == 1) && ((VERSION_MAJOR < 1) || (VERSION_MINOR < 0)))
-#  error "NO_SSD_SUPPORT must be used with in version 1.1 and above"
+#  error "NO_SSD_SUPPORT must be used with in version 1.10 and above"
 #endif
 
-// Each controller supports its own number of ports.  We must adhere to that for now.
-//  (The Extended Capabilities register set is hardcoded for this as of now.)
-//  As long as BX_N_USB_XHCI_PORTS was defined as greater than what we have now, then
-//  we are fine.
-// Note: BX_N_USB_XHCI_PORTS should have been defined as twice the amount of ports wanted.
-//  ie.: Each physical port (socket) has two defined port register sets.  One for USB3, one for USB2
-// Only one port type may be used at a time.  Port0 or Port1, not both.  If Port0 is used, then
-//  Port1 must be vacant.
-#define BX_N_USB_XHCI_PORTS 4
-
 // xHCI speed values
-#define SPEED_FULL   1
-#define SPEED_LOW    2
-#define SPEED_HI     3
-#define SPEED_SUPER  4
+#define XHCI_SPEED_FULL   1
+#define XHCI_SPEED_LOW    2
+#define XHCI_SPEED_HIGH   3
+#define XHCI_SPEED_SUPER  4
 
 #define USB2 0
 #define USB3 1
+
+// Port Status Change Bits
+#define PSCEG_CSC  (1<<0)
+#define PSCEG_PEC  (1<<1)
+#define PSCEG_WRC  (1<<2)
+#define PSCEG_OCC  (1<<3)
+#define PSCEG_PRC  (1<<4)
+#define PSCEG_PLC  (1<<5)
+#define PSCEG_CEC  (1<<6)
+
+// Extended Capabilities: Protocol
+struct XHCI_PROTOCOL {
+  Bit8u  id;
+  Bit8u  next;
+  Bit16u version;
+  Bit8u  name[4];
+  Bit8u  start_index;
+  Bit8u  count;
+  Bit16u flags;
+};
 
 // our saved ring members
 struct RING_MEMBERS {
@@ -211,9 +240,18 @@ struct EP_CONTEXT {
   unsigned average_trb_len;
 };
 
+struct STREAM_CONTEXT {
+  bool     valid; // is this context valid
+  Bit64u   tr_dequeue_pointer;
+  bool     dcs;
+  int      sct;
+#if ((VERSION_MAJOR == 1) && (VERSION_MINOR >= 0x10))
+  Bit32u   stopped_EDTLA;
+#endif
+};
+
 struct HC_SLOT_CONTEXT {
   bool enabled;
-  bool sent_address;  // have we sent a SET_ADDRESS command yet?
   struct SLOT_CONTEXT slot_context;
   struct {
     struct EP_CONTEXT   ep_context;
@@ -223,6 +261,7 @@ struct HC_SLOT_CONTEXT {
     bool    rcs;
     bool    retry;
     int     retry_counter;
+    struct STREAM_CONTEXT stream[MAX_PSA_SIZE_NUM]; // first one is reserved
   } ep_context[32];  // first one is ignored by controller.
 };
 
@@ -235,7 +274,18 @@ enum { NORMAL=1, SETUP_STAGE, DATA_STAGE, STATUS_STAGE, ISOCH, LINK, EVENT_DATA,
        HOST_CONTROLLER_EVENT=37, DEVICE_NOTIFICATION, MFINDEX_WRAP,
        // 40 - 47 = reserved
        // 48 - 63 = Vendor Defined
+       // 48, 49, & 50 are used for the NEC Vendor Defined commands
+       NEC_TRB_TYPE_CMD_COMP = 48,
+       NEC_TRB_TYPE_GET_FW = 49,
+       NEC_TRB_TYPE_GET_UN = 50,
+       // 60 is used for the Bochs Dump vendor command
+       BX_TRB_TYPE_DUMP = 60,
 };
+
+// NEC Vendor specific TRB types
+#define NEC_FW_MAJOR(v)       (((v) & 0x0000FF00) >> 8)
+#define NEC_FW_MINOR(v)       (((v) & 0x000000FF) >> 0)
+
 
 // event completion codes
 enum { TRB_SUCCESS=1, DATA_BUFFER_ERROR, BABBLE_DETECTION, TRANSACTION_ERROR, TRB_ERROR, STALL_ERROR,
@@ -278,14 +328,6 @@ enum { PLS_U0 = 0, PLS_U1, PLS_U2, PLS_U3_SUSPENDED, PLS_DISABLED, PLS_RXDETECT,
 #define EP_STATE_STOPPED  3
 #define EP_STATE_ERROR    4
 
-// NEC Vendor specific TRB types
-#define NEC_TRB_TYPE_CMD_COMP 48
-#define NEC_TRB_TYPE_GET_FW   49
-#define NEC_TRB_TYPE_GET_UN   50
-  #define NEC_MAGIC           0x49434878
-#define NEC_FW_MAJOR(v)       (((v) & 0x0000FF00) >> 8)
-#define NEC_FW_MINOR(v)       (((v) & 0x000000FF) >> 0)
-
 #define TRB_GET_STYPE(x)     (((x) & (0x1F << 16)) >> 16)
 #define TRB_SET_STYPE(x)     (((x) & 0x1F) << 16)
 #define TRB_GET_TYPE(x)      (((x) & (0x3F << 10)) >> 10)
@@ -318,7 +360,14 @@ struct TRB {
   Bit32u command;
 };
 
+enum {
+  XHCI_HC_uPD720202,     // Renesas/NEC uPD720202 (2 sockets)  (default)
+  XHCI_HC_uPD720201      // Renesas/NEC uPD720201 (4 sockets)
+};
+
 typedef struct {
+  Bit32u HostController;
+  unsigned int n_ports;
 
   struct XHCI_CAP_REGS {
     Bit32u HcCapLength;
@@ -415,6 +464,7 @@ typedef struct {
     usb_device_c *device; // device connected to this port
     bool is_usb3;         // set if usb3 port, cleared if usb2 port.
     bool has_been_reset;  // set if the port has been reset aftet powered up.
+    Bit8u psceg;          // current port status change event
 
     struct {
       bool  wpr;               //  1 bit Warm Port Reset             = 0b             RW or RsvdZ
@@ -478,7 +528,7 @@ typedef struct {
       Bit8u   hirdd;             //  4 bit host initiated resume duration deep
       Bit32u  RsvdP;             // 18 bit reserved and preseved       = 0x00000000     RW
     } porthlpmc;
-  } usb_port[USB_XHCI_PORTS];
+  } usb_port[USB_XHCI_PORTS_MAX];
 
   // Extended Caps Registers
   Bit8u extended_caps[EXT_CAPS_SIZE];
@@ -518,6 +568,13 @@ typedef struct {
   struct HC_SLOT_CONTEXT slots[MAX_SLOTS];  // first one is ignored by controller.
 
   struct RING_MEMBERS ring_members;
+  
+  // filled at runtime with ex: { USB3, USB3, USB2, USB2 };
+  //Bit8u port_speed_allowed[USB_XHCI_PORTS_MAX];
+  // four speeds of: 'reserved' + a port count of bytes rounded up to and 8 byte size (ie: 8, 16, 24, 32 bytes each speed)
+  Bit8u port_band_width[4 * ((1 + USB_XHCI_PORTS_MAX) + 8)]; // + 8 gives us ample room for a boundary of 8-byte entries per speed
+  // the port's paired port num. i.e., with 4 ports, 1 is paired with 3, 2 is paired with 4
+  int   paired_portnum[USB_XHCI_PORTS_MAX];
 } bx_usb_xhci_t;
 
 // Version 3.0.23.0 of the Renesas uPD720202 driver, even though the card is
@@ -565,12 +622,16 @@ private:
   static void remove_device(Bit8u port);
   static bool usb_set_connect_status(Bit8u port, bool connected);
 
+  static int  broadcast_speed(const int slot);
   static int  broadcast_packet(USBPacket *p, const int port);
+  static Bit8u get_psceg(const int port);
   static void xhci_timer_handler(void *);
   void xhci_timer(void);
 
-  static void process_transfer_ring(const int slot, const int ep);
+  static Bit64u process_transfer_ring(const int slot, const int ep, Bit64u ring_addr, bool *rcs, const int primary_sid);
   static void process_command_ring(void);
+  static void get_stream_info(struct STREAM_CONTEXT *context, const Bit64u address, const int index);
+  static void put_stream_info(struct STREAM_CONTEXT *context, const Bit64u address, const int index);
   static void write_event_TRB(const unsigned interrupter, const Bit64u parameter, const Bit32u status,
                               const Bit32u command, const bool fire_int);
   static Bit32u NEC_verification(const Bit64u parameter);
@@ -581,16 +642,19 @@ private:
   static void update_ep_context(const int slot, const int ep);
   static void dump_slot_context(const Bit32u *context, const int slot);
   static void dump_ep_context(const Bit32u *context, const int slot, const int ep);
+  static void dump_stream_context(const Bit32u *context);
   static void copy_slot_from_buffer(struct SLOT_CONTEXT *slot_context, const Bit8u *buffer);
   static void copy_ep_from_buffer(struct EP_CONTEXT *ep_context, const Bit8u *buffer);
   static void copy_slot_to_buffer(Bit32u *buffer, const int slot);
   static void copy_ep_to_buffer(Bit32u *buffer, const int slot, const int ep);
-  static bool validate_slot_context(const struct SLOT_CONTEXT *slot_context);
-  static bool validate_ep_context(const struct EP_CONTEXT *ep_context, int speed, int ep_num);
+  static void copy_stream_from_buffer(struct STREAM_CONTEXT *context, const Bit8u *buffer);
+  static void copy_stream_to_buffer(Bit8u *buffer, const struct STREAM_CONTEXT *context);
+  static int  validate_slot_context(const struct SLOT_CONTEXT *slot_context, const int trb_command, const int slot);
+  static int  validate_ep_context(const struct EP_CONTEXT *ep_context, const int trb_command, const Bit32u a_flags, int port_num, int ep_num);
   static int  create_unique_address(const int slot);
-  static int  send_set_address(const int addr, const int port_num);
+  static int  send_set_address(const int addr, const int port_num, const int slot);
 
-  static void dump_xhci_core(const int slots, const int eps);
+  static void dump_xhci_core(const unsigned int slots, const unsigned int eps);
 
 #if BX_USE_USB_XHCI_SMF
   static bool read_handler(bx_phy_address addr, unsigned len, void *data, void *param);

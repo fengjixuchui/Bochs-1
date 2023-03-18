@@ -2,8 +2,8 @@
 // $Id$
 /////////////////////////////////////////////////////////////////////////
 //
-//  Copyright (C) 2010-2017  Benjamin D Lunt (fys [at] fysnet [dot] net)
-//                2011-2021  The Bochs Project
+//  Copyright (C) 2010-2023  Benjamin D Lunt (fys [at] fysnet [dot] net)
+//                2011-2023  The Bochs Project
 //
 //  This library is free software; you can redistribute it and/or
 //  modify it under the terms of the GNU Lesser General Public
@@ -20,7 +20,7 @@
 //  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA
 /////////////////////////////////////////////////////////////////////////
 
-// Experimental USB xHCI adapter
+// USB xHCI adapter
 
 // Define BX_PLUGGABLE in files that can be compiled into plugins.  For
 // platforms that require a special tag on exported symbols, BX_PLUGGABLE
@@ -32,31 +32,34 @@
  *   Root Hub xHCI Host Controller.
  *  Many, many thanks to Renesas for their work and effort in helping my research.
  *
- *  I have tested in with my own tests and WinXP Home Edition SP3.
+ *  I have tested in with my own tests and WinXP Home Edition SP3 and Windows 7 Ultimate.
  *
- *  Use port1 and port2 to emulate a Super-speed device, and use port3 and port4
- *   to emulate Low-, Full-, or High-speed devices.
+ *  Assuming a two-socket, four-port root hub:
+ *   Use port1 and port2 to emulate a Super-speed device, and use port3 and port4
+ *    to emulate Low-, Full-, or High-speed devices.
+ *  (Other settings, use the first half as Super-speed, and the last half as the other speeds)
  *
  *  Examples:
- *   usb_xhci: enabled=1, port3=disk:"usbdisk.img", options3=speed:low
- *   usb_xhci: enabled=1, port3=disk:"usbdisk.img", options3=speed:full
- *   usb_xhci: enabled=1, port3=disk:"usbdisk.img", options3=speed:high
- *   usb_xhci: enabled=1, port1=disk:"usbdisk.img", options1=speed:super
+ *   usb_xhci: enabled=1, port3=mouse, options3="speed:low"
+ *   usb_xhci: enabled=1, port3=disk, options3="speed:full, path:usbdisk.img"
+ *   usb_xhci: enabled=1, port3=disk, options3="speed:high, path:usbdisk.img"
+ *   usb_xhci: enabled=1, port1=disk, options1="speed:super, path:usbdisk.img"
+ *   usb_xhci: enabled=1, port1=cdrom, options1="speed:super, path:cdrom.iso"
  *
- *  Currently, only a USB MSD Thumb Drive device is emulated as a Super-speed device.
- *  All other emulated devices are Low- or Full-speed devices.
+ *  Currently, only a USB MSD Thumb Drive device ("=disk") and a USB MSD CDROM ("=cdrom")
+ *   can be emulated as a Super-speed device.
+ *  All other emulated devices must be Low-, Full-, or High-speed devices.
  *
  * This code is 32- and 64-bit addressing aware (uses: bx_phy_address & ADDR_CAP_64)
  *
  * This emulation is coded with the new registers of xHCI version 1.10.  However,
- *  nothing more has been done to emulate 1.10 features.  YET.
- * This emulation is set with VERSION_MAJOR and VERSION_MINOR, 0x01 and 0x10
- *  respectively.
+ *  at this time, nothing more has been done to emulate 1.10 features.
+ * This emulation is set with VERSION_MAJOR and VERSION_MINOR as 0x01 and 0x00
+ *  respectively (version 1.00).
  *
- * This emulation is experimental.  It is not completly accorate, though it is
- *  my intention to make it as close as possible.  If you find an error or would
+ * This emulation seems to work as expected.  It may not be completly accorate, though
+ *  it is my intention to make it as close as possible.  If you find an error or would
  *  like to add to the emulation, please let me know at fys [at] fysnet [dot] net.
- *
  *
  */
 
@@ -70,10 +73,11 @@
 
 #define LOG_THIS theUSB_XHCI->
 
-bx_usb_xhci_c* theUSB_XHCI = NULL;
+bx_usb_xhci_c *theUSB_XHCI = NULL;
 
-Bit8u port_speed_allowed[USB_XHCI_PORTS] = { USB3, USB3, USB2, USB2 };
-Bit8u ext_caps[EXT_CAPS_SIZE] = {
+#define PROTOCOL_UBS3_OFFSET  (0x510 - 0x500)  // offset to the USB3 protocol struct
+#define PROTOCOL_UBS2_OFFSET  (0x524 - 0x500)  // offset to the USB2 protocol struct
+static Bit8u ext_caps[EXT_CAPS_SIZE] = {
   /* 0x500 */ 0x01,                    // Legacy Support
               0x04,                    // next = 0x04 * 4 = 0x510
               0x00, 0x00,              // Semaphores
@@ -81,25 +85,27 @@ Bit8u ext_caps[EXT_CAPS_SIZE] = {
               0x00, 0x00, 0x00, 0x00,  // reserved
               0x00, 0x00, 0x00, 0x00,  // filler
 
+              // this block is modified by init()
   /* 0x510 */ 0x02,                    // Port Protocol
               0x05,                    // next = 0x05 * 4 = 0x524
               0x00, 0x03,              // Version 3.0
               0x55, 0x53, 0x42, 0x20,  // "USB "
               0x01,                    // 1-based starting index
               0x02,                    // count of 2 port registers starting at base above
-              0x00, 0x00,              // reserved
-              0x00, 0x00, 0x00, 0x00,  // reserved
-              0x00, 0x00, 0x00, 0x00,  // filler
+              0x00, 0x00,              // flags
+              0x00, 0x00, 0x00, 0x00,  // 8 bytes of filler (unnecessary to this emulation
+              0x00, 0x00, 0x00, 0x00,  //   but it exists on the uPD720202 hardware)
 
+              // this block is modified by init()
   /* 0x524 */ 0x02,                    // Port Protocol
               0x07,                    // next = 0x07 * 4 = 0x540
               0x00, 0x02,              // Version 2.0
               0x55, 0x53, 0x42, 0x20,  // "USB "
               0x03,                    // 1-based starting index
               0x02,                    // count of 2 port registers starting at base above
-              0x00, 0x00,              //
-              0x00, 0x00, 0x00, 0x00,  //
-              0x00, 0x00, 0x00, 0x00,  //
+              0x00, 0x00,              // flags
+              0x00, 0x00, 0x00, 0x00,  // 16 bytes of filler (unnecessary to this emulation
+              0x00, 0x00, 0x00, 0x00,  //    but it exists on the uPD720202 hardware)
               0x00, 0x00, 0x00, 0x00,  //
               0x00, 0x00, 0x00, 0x00,  //
 
@@ -139,28 +145,31 @@ Bit8u ext_caps[EXT_CAPS_SIZE] = {
               0x00, 0x00, 0x00, 0x00   // filler
 };
 
-/* See Section 6.2.6 of xHCI version 1.00
- *  Bandwidth of each port (4) of each speed.
- */
-Bit8u port_band_width[4][1 + USB_XHCI_PORTS] = {
-/*                   rsvd, port1, port2, port3, port4 */
-/*  Full Speed */  { 0x00,     0,     0,    90,    90 },
-/*   Low Speed */  { 0x00,     0,     0,    90,    90 },
-/*  High Speed */  { 0x00,     0,     0,    80,    80 },
-/* Super Speed */  { 0x00,    90,    90,     0,     0 }
-};
-
 // builtin configuration handling functions
-
 Bit32s usb_xhci_options_parser(const char *context, int num_params, char *params[])
 {
+  int max_ports;
+  
   if (!strcmp(params[0], "usb_xhci")) {
     bx_list_c *base = (bx_list_c*) SIM->get_param(BXPN_USB_XHCI);
     for (int i = 1; i < num_params; i++) {
       if (!strncmp(params[i], "enabled=", 8)) {
         SIM->get_param_bool(BXPN_XHCI_ENABLED)->set(atol(&params[i][8]));
+      } else if (!strncmp(params[i], "model=", 6)) {
+        if (!strcmp(&params[i][6], "uPD720202"))
+          SIM->get_param_enum(BXPN_XHCI_MODEL)->set(XHCI_HC_uPD720202);
+        else if (!strcmp(&params[i][6], "uPD720201"))
+          SIM->get_param_enum(BXPN_XHCI_MODEL)->set(XHCI_HC_uPD720201);
+        else
+          BX_PANIC(("%s: unknown parameter '%s' for usb_xhci: model=", context, &params[i][6]));
+      } else if (!strncmp(params[i], "n_ports=", 8)) {
+        max_ports = (int) strtol(&params[i][8], NULL, 10);
+        if ((max_ports >= 2) && (max_ports <= USB_XHCI_PORTS_MAX) && !(max_ports & 1))
+          SIM->get_param_num(BXPN_XHCI_N_PORTS)->set(max_ports);
+        else
+          BX_PANIC(("%s: n_ports= must be at least 2, no more than %d, and an even number.", context, USB_XHCI_PORTS_MAX));
       } else if (!strncmp(params[i], "port", 4) || !strncmp(params[i], "options", 7)) {
-        if (SIM->parse_usb_port_params(context, params[i], BX_N_USB_XHCI_PORTS, base) < 0) {
+        if (SIM->parse_usb_port_params(context, params[i], USB_XHCI_PORTS_MAX, base) < 0) {
           return -1;
         }
       } else {
@@ -176,7 +185,7 @@ Bit32s usb_xhci_options_parser(const char *context, int num_params, char *params
 Bit32s usb_xhci_options_save(FILE *fp)
 {
   bx_list_c *base = (bx_list_c*) SIM->get_param(BXPN_USB_XHCI);
-  SIM->write_usb_options(fp, BX_N_USB_XHCI_PORTS, base);
+  SIM->write_usb_options(fp, USB_XHCI_PORTS_MAX, base);
   return 0;
 }
 
@@ -188,12 +197,12 @@ PLUGIN_ENTRY_FOR_MODULE(usb_xhci)
     theUSB_XHCI = new bx_usb_xhci_c();
     BX_REGISTER_DEVICE_DEVMODEL(plugin, type, theUSB_XHCI, BX_PLUGIN_USB_XHCI);
     // add new configuration parameter for the config interface
-    SIM->init_usb_options("xHCI", "xhci", BX_N_USB_XHCI_PORTS);
+    SIM->init_usb_options("xHCI", "xhci", USB_XHCI_PORTS_MAX);
     // register add-on option for bochsrc and command line
     SIM->register_addon_option("usb_xhci", usb_xhci_options_parser, usb_xhci_options_save);
   } else if (mode == PLUGIN_FINI) {
     SIM->unregister_addon_option("usb_xhci");
-    bx_list_c *menu = (bx_list_c*)SIM->get_param("ports.usb");
+    bx_list_c *menu = (bx_list_c *) SIM->get_param("ports.usb");
     delete theUSB_XHCI;
     menu->remove("xhci");
   } else if (mode == PLUGIN_PROBE) {
@@ -220,7 +229,7 @@ bx_usb_xhci_c::~bx_usb_xhci_c()
 
   SIM->unregister_runtime_config_handler(rt_conf_id);
 
-  for (int i=0; i<USB_XHCI_PORTS; i++) {
+  for (int i=0; i<USB_XHCI_PORTS_MAX; i++) {
     sprintf(pname, "port%d.device", i+1);
     SIM->get_param_enum(pname, SIM->get_param(BXPN_USB_XHCI))->set_handler(NULL);
     sprintf(pname, "port%d.options", i+1);
@@ -229,18 +238,20 @@ bx_usb_xhci_c::~bx_usb_xhci_c()
   }
 
   SIM->get_bochs_root()->remove("usb_xhci");
-  bx_list_c *usb_rt = (bx_list_c*)SIM->get_param(BXPN_MENU_RUNTIME_USB);
+  bx_list_c *usb_rt = (bx_list_c *) SIM->get_param(BXPN_MENU_RUNTIME_USB);
   usb_rt->remove("xhci");
   BX_DEBUG(("Exit"));
 }
 
 void bx_usb_xhci_c::init(void)
 {
-  unsigned i;
+  unsigned i, j;
   char pname[6];
+  Bit8u *p;
   bx_list_c *xhci, *port;
   bx_param_enum_c *device;
   bx_param_string_c *options;
+  struct XHCI_PROTOCOL *protocol;
 
   /*  If you wish to set DEBUG=report in the code, instead of
    *  in the configuration, simply uncomment this line.  I use
@@ -249,12 +260,12 @@ void bx_usb_xhci_c::init(void)
   //LOG_THIS setonoff(LOGLEV_DEBUG, ACT_REPORT);
 
   // Read in values from config interface
-  xhci = (bx_list_c*) SIM->get_param(BXPN_USB_XHCI);
+  xhci = (bx_list_c *) SIM->get_param(BXPN_USB_XHCI);
   // Check if the device is disabled or not configured
   if (!SIM->get_param_bool("enabled", xhci)->get()) {
     BX_INFO(("USB xHCI disabled"));
     // mark unused plugin for removal
-    ((bx_param_bool_c*)((bx_list_c*)SIM->get_param(BXPN_PLUGIN_CTRL))->get_by_name("usb_xhci"))->set(0);
+    ((bx_param_bool_c *)((bx_list_c *) SIM->get_param(BXPN_PLUGIN_CTRL))->get_by_name("usb_xhci"))->set(0);
     return;
   }
 
@@ -265,16 +276,42 @@ void bx_usb_xhci_c::init(void)
   DEV_register_pci_handlers(this, &BX_XHCI_THIS devfunc, BX_PLUGIN_USB_XHCI,
                             "Experimental USB xHCI");
 
-  // initialize readonly registers
-  // 0x1912 = vendor (Renesas)
-  // 0x0015 = device (0x0014 = uPD720201, 0x0015 = uPD720202)
-  // revision number (0x03 = uPD720201, 0x02 = uPD720202)
-  init_pci_conf(0x1912, 0x0015, 0x02, 0x0c0330, 0x00, BX_PCI_INTD);
+  // get the desired host controller type
+  BX_XHCI_THIS hub.HostController = SIM->get_param_enum(BXPN_XHCI_MODEL)->get();
+  if (BX_XHCI_THIS hub.HostController == XHCI_HC_uPD720202) {
+    BX_INFO(("xHCI Host Controller: uPD720202"));
+    BX_XHCI_THIS hub.n_ports = USB_XHCI_PORTS; // we hard code to USB_XHCI_PORTS for this host controller (default)
+    // 0x1912 = vendor (Renesas)
+    // 0x0015 = device (0x0015 = uPD720202)
+    // revision number (0x02 = uPD720202)
+    init_pci_conf(0x1912, 0x0015, 0x02, 0x0C0330, 0x00, BX_PCI_INTD);
+  } else if (BX_XHCI_THIS hub.HostController == XHCI_HC_uPD720201) {
+    BX_INFO(("xHCI Host Controller: uPD720201"));
+    BX_XHCI_THIS hub.n_ports = 8; // we hard code to 8 for this host controller
+    // 0x1912 = vendor (Renesas)
+    // 0x0014 = device (0x0014 = uPD720201)
+    // revision number (0x03 = uPD720201)
+    init_pci_conf(0x1912, 0x0014, 0x03, 0x0C0330, 0x00, BX_PCI_INTD);
+  } else {
+    BX_PANIC(("Unknown xHCI Host Controller specified..."));
+    return;
+  }
+
+  // set the number of ports used
+  // if n_ports is not given in the Bochsrc.txt file, the number of ports
+  //  is defaulted to the controller type above
+  Bit32s n_ports = SIM->get_param_num(BXPN_XHCI_N_PORTS)->get();
+  if (n_ports > -1) BX_XHCI_THIS hub.n_ports = n_ports;
+  if ((BX_XHCI_THIS hub.n_ports < 2) || (BX_XHCI_THIS hub.n_ports > USB_XHCI_PORTS_MAX) || (BX_XHCI_THIS hub.n_ports & 1)) {
+    BX_PANIC(("n_ports (%d) must be at least 2, not more than 10, and must be an even number.", BX_XHCI_THIS hub.n_ports));
+    return;
+  }
+
   BX_XHCI_THIS init_bar_mem(0, IO_SPACE_SIZE, read_handler, write_handler);
 
   // initialize capability registers
   BX_XHCI_THIS hub.cap_regs.HcCapLength  = (VERSION_MAJOR << 24) | (VERSION_MINOR << 16) | OPS_REGS_OFFSET;
-  BX_XHCI_THIS hub.cap_regs.HcSParams1   = (USB_XHCI_PORTS << 24) | (INTERRUPTERS << 8) | MAX_SLOTS;
+  BX_XHCI_THIS hub.cap_regs.HcSParams1   = (BX_XHCI_THIS hub.n_ports << 24) | (INTERRUPTERS << 8) | MAX_SLOTS;
   BX_XHCI_THIS hub.cap_regs.HcSParams2   =
     // MAX_SCRATCH_PADS 4:0 in bits 31:27 (v1.00) and bits 9:5 in bits 21:25 (v1.01+)
     ((MAX_SCRATCH_PADS >> 5) << 21) | ((MAX_SCRATCH_PADS & 0x1F) << 27) |
@@ -294,12 +331,12 @@ void bx_usb_xhci_c::init(void)
 #endif
 
   // initialize runtime configuration
-  bx_list_c *usb_rt = (bx_list_c*)SIM->get_param(BXPN_MENU_RUNTIME_USB);
+  bx_list_c *usb_rt = (bx_list_c *) SIM->get_param(BXPN_MENU_RUNTIME_USB);
   bx_list_c *xhci_rt = new bx_list_c(usb_rt, "xhci", "xHCI Runtime Options");
   xhci_rt->set_options(xhci_rt->SHOW_PARENT | xhci_rt->USE_BOX_TITLE);
-  for (i=0; i<USB_XHCI_PORTS; i++) {
+  for (i=0; i<BX_XHCI_THIS hub.n_ports; i++) {
     sprintf(pname, "port%d", i+1);
-    port = (bx_list_c*)SIM->get_param(pname, xhci);
+    port = (bx_list_c *) SIM->get_param(pname, xhci);
     xhci_rt->add(port);
     device = (bx_param_enum_c*)port->get_by_name("device");
     device->set_handler(usb_param_handler);
@@ -315,9 +352,71 @@ void bx_usb_xhci_c::init(void)
   BX_XHCI_THIS device_change = 0;
   BX_XHCI_THIS packets = NULL;
 
-  for (i=0; i<USB_XHCI_PORTS; i++)
-    BX_XHCI_THIS hub.usb_port[i].is_usb3 = (port_speed_allowed[i] == USB3);
+  // The remaining is the code to adjust all items that depend
+  //  on the count of port registers. This needs to be done at run-time
+  //  so that we can adjust the count without hard-coding anything.
+  // We divide the sets evenly and place the USB3 register sets 
+  //  before the USB2 register sets.
+  
+  // initialize the allowed speeds for each port
+  // initialize the paired port number for each port
+  // TODO: port_speed_allowed is currently unused
+  for (i=0; i<(BX_XHCI_THIS hub.n_ports / 2); i++) {
+    //BX_XHCI_THIS hub.port_speed_allowed[i] = USB3;
+    BX_XHCI_THIS hub.usb_port[i].is_usb3 = 1;
+    BX_XHCI_THIS hub.paired_portnum[i] = i + (BX_XHCI_THIS hub.n_ports / 2); // zero based
+  }
+  for (; i<BX_XHCI_THIS hub.n_ports; i++) {
+    //BX_XHCI_THIS hub.port_speed_allowed[i] = USB2;
+    BX_XHCI_THIS hub.usb_port[i].is_usb3 = 0;
+    BX_XHCI_THIS hub.paired_portnum[i] = i - (BX_XHCI_THIS hub.n_ports / 2); // zero based
+  }
 
+  // Bandwidth of each port of each speed.
+  // See Section 6.2.6 of xHCI version 1.00
+  // example: four port (two socket):
+  //                  rsvd, port1, port2, port3, port4  (padding to 8 bytes)
+  //  Full Speed:   { 0x00,     0,     0,    90,    90,  0, 0, 0 },
+  //   Low Speed:   { 0x00,     0,     0,    90,    90,  0, 0, 0 },
+  //  High Speed:   { 0x00,     0,     0,    80,    80,  0, 0, 0 },
+  // Super Speed:   { 0x00,    90,    90,     0,     0,  0, 0, 0 }
+  // (These numbers are for a two socket, four port hc.)
+  // (They will need to be different for a different combination)
+  p = BX_XHCI_THIS hub.port_band_width;
+  for (i=0; i<4; i++) { // 4 speeds
+    *p++ = 0; // first entry is reserved
+    for (j=0; j<BX_XHCI_THIS hub.n_ports; j++) {
+      switch (i) {
+        case 0: // Full Speed
+        case 1: // Low Speed
+          *p++ = (j < (BX_XHCI_THIS hub.n_ports / 2)) ? 0 : 90;
+          break;
+        case 2: // High Speed
+          *p++ = (j < (BX_XHCI_THIS hub.n_ports / 2)) ? 0 : 80;
+          break;
+        case 3: // Super Speed
+          *p++ = (j < (BX_XHCI_THIS hub.n_ports / 2)) ? 90 : 0;
+          break;
+      }
+    }
+    // pad to an 8-byte boundary
+    while ((j & 7) < 7) {
+      *p++ = 0;
+      j++;
+    }
+  }
+
+  // adjust the Extended Caps Protocol fields
+  // first the USB3 (first half ports)
+  protocol = (struct XHCI_PROTOCOL *) &ext_caps[PROTOCOL_UBS3_OFFSET];
+  protocol->start_index = 1; // 1 based starting index
+  protocol->count = BX_XHCI_THIS hub.n_ports / 2;
+  // then the USB2 (second half ports)
+  protocol = (struct XHCI_PROTOCOL *) &ext_caps[PROTOCOL_UBS2_OFFSET];
+  protocol->start_index = (BX_XHCI_THIS hub.n_ports / 2) + 1; // 1 based starting index
+  protocol->count = BX_XHCI_THIS hub.n_ports / 2;
+
+  // done initializing
   BX_INFO(("USB xHCI initialized"));
 }
 
@@ -356,7 +455,7 @@ void bx_usb_xhci_c::reset(unsigned type)
       // capabilities list:
       { 0x50, 0x01 },                 // PCI Power Management
 
-//      { 0x51, 0x70 },                 //  Pointer to next item (0x00 = no more)
+//      { 0x51, 0x70 },                 //  Pointer to next item (0x70 -> MSI stuff)
       { 0x51, 0x00 },                 //  Pointer to next item (0x00 = no more)
 
       { 0x52, 0xC3 }, { 0x53, 0xC9 }, //  Capabilities:  version = 1.2, Aux Current = 375mA,
@@ -467,7 +566,7 @@ void bx_usb_xhci_c::reset(unsigned type)
 
 void bx_usb_xhci_c::reset_hc()
 {
-  int i;
+  unsigned int i;
   char pname[6];
 
   // Command
@@ -543,11 +642,11 @@ void bx_usb_xhci_c::reset_hc()
   BX_XHCI_THIS hub.op_regs.HcConfig.MaxSlotsEn = 0;
 
   // Ports[x]
-  for (i=0; i<USB_XHCI_PORTS; i++) {
+  for (i=0; i<BX_XHCI_THIS hub.n_ports; i++) {
     reset_port(i);
     if (BX_XHCI_THIS hub.usb_port[i].device == NULL) {
       sprintf(pname, "port%d", i+1);
-      init_device(i, (bx_list_c*)SIM->get_param(pname, SIM->get_param(BXPN_USB_XHCI)));
+      init_device(i, (bx_list_c *) SIM->get_param(pname, SIM->get_param(BXPN_USB_XHCI)));
     } else {
       usb_set_connect_status(i, 1);
     }
@@ -578,7 +677,7 @@ void bx_usb_xhci_c::reset_hc()
 
   // reset our slot contexts
   for (i=0; i<MAX_SLOTS; i++)
-    BX_XHCI_THIS hub.slots[i].enabled = 0;
+    memset(&BX_XHCI_THIS hub.slots[i], 0, sizeof(struct HC_SLOT_CONTEXT));
 
   while (BX_XHCI_THIS packets != NULL) {
     usb_cancel_packet(&BX_XHCI_THIS packets->packet);
@@ -628,11 +727,12 @@ void bx_usb_xhci_c::reset_port(int p)
   }
 
   BX_XHCI_THIS hub.usb_port[p].has_been_reset = 0;
+  BX_XHCI_THIS hub.usb_port[p].psceg = 0;
 }
 
 void bx_usb_xhci_c::reset_port_usb3(int port, const int reset_type)
 {
-  BX_INFO(("Reset port #%i, type=%i", port + 1, reset_type));
+  BX_INFO(("Reset port #%d, type=%d", port + 1, reset_type));
   BX_XHCI_THIS hub.usb_port[port].portsc.pr = 0;
   BX_XHCI_THIS hub.usb_port[port].has_been_reset = 1;
   if (BX_XHCI_THIS hub.usb_port[port].portsc.ccs) {
@@ -643,7 +743,6 @@ void bx_usb_xhci_c::reset_port_usb3(int port, const int reset_type)
       BX_XHCI_THIS hub.usb_port[port].device->usb_send_msg(USB_MSG_RESET);
       if (BX_XHCI_THIS hub.usb_port[port].is_usb3 && (reset_type == WARM_RESET))
         BX_XHCI_THIS hub.usb_port[port].portsc.wrc = 1;
-      BX_XHCI_THIS hub.usb_port[port].portsc.prc = 1;
     }
   } else {
     BX_XHCI_THIS hub.usb_port[port].portsc.pls = PLS_RXDETECT;
@@ -763,10 +862,10 @@ bool bx_usb_xhci_c::restore_hc_state(void)
 
 void bx_usb_xhci_c::register_state(void)
 {
-  unsigned i, j;
+  unsigned i, j, k;
   char tmpname[16];
   bx_list_c *hub, *port, *reg, *reg_grp, *reg_grp1;
-  bx_list_c *list1, *list2, *item, *entries, *entry;
+  bx_list_c *list1, *list2, *list3, *item, *entries, *entry, *entry1;
 
   bx_list_c *list = new bx_list_c(SIM->get_bochs_root(), "usb_xhci", "USB xHCI State");
   hub = new bx_list_c(list, "hub");
@@ -822,14 +921,15 @@ void bx_usb_xhci_c::register_state(void)
   BXRS_HEX_PARAM_FIELD(reg_grp, HcDCBAAP, BX_XHCI_THIS hub.op_regs.HcDCBAAP.dcbaap);
   BXRS_HEX_PARAM_FIELD(reg_grp, HcConfig_MaxSlotsEn, BX_XHCI_THIS hub.op_regs.HcConfig.MaxSlotsEn);
 #if ((VERSION_MAJOR == 1) && (VERSION_MINOR >= 0x10))
-  BXRS_HEX_PARAM_FIELD(reg_grp, HcConfig_u3e, BX_XHCI_THIS hub.op_regs.HcConfig.u3e);
-  BXRS_HEX_PARAM_FIELD(reg_grp, HcConfig_cie, BX_XHCI_THIS hub.op_regs.HcConfig.cie);
+  BXRS_PARAM_BOOL(reg_grp, HcConfig_u3e, BX_XHCI_THIS hub.op_regs.HcConfig.u3e);
+  BXRS_PARAM_BOOL(reg_grp, HcConfig_cie, BX_XHCI_THIS hub.op_regs.HcConfig.cie);
 #endif
 
-  for (i = 0; i < USB_XHCI_PORTS; i++) {
+  for (i = 0; i < BX_XHCI_THIS hub.n_ports; i++) {
     sprintf(tmpname, "port%d", i+1);
     port = new bx_list_c(hub, tmpname);
     BXRS_PARAM_BOOL(port, has_been_reset, BX_XHCI_THIS hub.usb_port[i].has_been_reset);
+    BXRS_HEX_PARAM_FIELD(port, psceg, BX_XHCI_THIS hub.usb_port[i].psceg);
     reg = new bx_list_c(port, "portsc");
     BXRS_PARAM_BOOL(reg, wpr, BX_XHCI_THIS hub.usb_port[i].portsc.wpr);
     BXRS_PARAM_BOOL(reg, dr, BX_XHCI_THIS hub.usb_port[i].portsc.dr);
@@ -903,7 +1003,6 @@ void bx_usb_xhci_c::register_state(void)
     sprintf(tmpname, "slot%d", i);
     item = new bx_list_c(list1, tmpname);
     BXRS_PARAM_BOOL(item, enabled, BX_XHCI_THIS hub.slots[i].enabled);
-    BXRS_PARAM_BOOL(item, sent_address, BX_XHCI_THIS hub.slots[i].sent_address);
     list2 = new bx_list_c(item, "slot_context");
     BXRS_DEC_PARAM_FIELD(list2, entries, BX_XHCI_THIS hub.slots[i].slot_context.entries);
     BXRS_PARAM_BOOL(list2, hub, BX_XHCI_THIS hub.slots[i].slot_context.hub);
@@ -943,6 +1042,13 @@ void bx_usb_xhci_c::register_state(void)
       BXRS_PARAM_BOOL(entry, rcs, BX_XHCI_THIS hub.slots[i].ep_context[j].rcs);
       BXRS_PARAM_BOOL(entry, retry, BX_XHCI_THIS hub.slots[i].ep_context[j].retry);
       BXRS_DEC_PARAM_FIELD(entry, retry_counter, BX_XHCI_THIS hub.slots[i].ep_context[j].retry_counter);
+      for (k = 0; k < MAX_PSA_SIZE_NUM; k++) {
+        sprintf(tmpname, "%d", k);
+        entry1 = new bx_list_c(entry, tmpname);
+        list3 = new bx_list_c(entry1, "ep_stream");
+        BXRS_HEX_PARAM_FIELD(list3, tr_dequeue_pointer, BX_XHCI_THIS hub.slots[i].ep_context[j].stream[k].tr_dequeue_pointer);
+        BXRS_PARAM_BOOL(list3, dcs, BX_XHCI_THIS hub.slots[i].ep_context[j].stream[k].dcs);
+      }
     }
   }
 
@@ -973,7 +1079,7 @@ void bx_usb_xhci_c::register_state(void)
 void bx_usb_xhci_c::after_restore_state(void)
 {
   bx_pci_device_c::after_restore_pci_state(NULL);
-  for (int j=0; j<USB_XHCI_PORTS; j++) {
+  for (unsigned int j=0; j<BX_XHCI_THIS hub.n_ports; j++) {
     if (BX_XHCI_THIS hub.usb_port[j].device != NULL) {
       BX_XHCI_THIS hub.usb_port[j].device->after_restore_state();
     }
@@ -988,7 +1094,7 @@ void bx_usb_xhci_c::init_device(Bit8u port, bx_list_c *portconf)
     if (usb_set_connect_status(port, 1)) {
       portconf->get_by_name("options")->set_enabled(0);
       sprintf(pname, "usb_xhci.hub.port%d.device", port+1);
-      bx_list_c *sr_list = (bx_list_c*)SIM->get_param(pname, SIM->get_bochs_root());
+      bx_list_c *sr_list = (bx_list_c *) SIM->get_param(pname, SIM->get_bochs_root());
       BX_XHCI_THIS hub.usb_port[port].device->register_state(sr_list);
     } else {
       ((bx_param_enum_c*)portconf->get_by_name("device"))->set_by_name("none");
@@ -1173,7 +1279,7 @@ bool bx_usb_xhci_c::read_handler(bx_phy_address addr, unsigned len, void *data, 
   } else
 
   // Register Port Sets
-  if ((offset >= PORT_SET_OFFSET) && (offset < (PORT_SET_OFFSET + (USB_XHCI_PORTS * 16)))) {
+  if ((offset >= PORT_SET_OFFSET) && (offset < (PORT_SET_OFFSET + (BX_XHCI_THIS hub.n_ports * 16)))) {
     unsigned port = (((offset - PORT_SET_OFFSET) >> 4) & 0x3F); // calculate port number
     if (BX_XHCI_THIS hub.usb_port[port].portsc.pp) {
       // the speed field is only valid for USB3 before a port reset.  If a reset has not
@@ -1231,7 +1337,7 @@ bool bx_usb_xhci_c::read_handler(bx_phy_address addr, unsigned len, void *data, 
           break;
         case 0x0C:
 #if ((VERSION_MAJOR < 1) || ((VERSION_MAJOR == 1) && (VERSION_MINOR == 0)))
-          BX_ERROR(("Read from Reserved Register in Port Register Set %i", port));
+          BX_ERROR(("Read from Reserved Register in Port Register Set %d", port));
 #else
           val =    (BX_XHCI_THIS hub.usb_port[port].porthlpmc.RsvdP             << 14)
                  | (BX_XHCI_THIS hub.usb_port[port].porthlpmc.hirdd             << 10)
@@ -1339,11 +1445,11 @@ bool bx_usb_xhci_c::read_handler(bx_phy_address addr, unsigned len, void *data, 
     val = 0;
   } else {
 #if BX_PHY_ADDRESS_LONG
-    BX_ERROR(("register read from unknown offset 0x%08X:  0x%08X%08X (len=%i)", offset, (Bit32u) val_hi, (Bit32u) val, len));
+    BX_ERROR(("register read from unknown offset 0x%08X:  0x%08X%08X (len=%d)", offset, (Bit32u) val_hi, (Bit32u) val, len));
 #else
-    BX_DEBUG(("register read from unknown offset 0x%08X:  0x%08X (len=%i)", offset, (Bit32u) val, len));
+    BX_DEBUG(("register read from unknown offset 0x%08X:  0x%08X (len=%d)", offset, (Bit32u) val, len));
     if (len > 4)
-      BX_DEBUG(("Ben: In 32-bit mode, len > 4! (len=%i)", len));
+      BX_DEBUG(("Ben: In 32-bit mode, len > 4! (len=%d)", len));
 #endif
   }
   switch (len) {
@@ -1366,11 +1472,12 @@ bool bx_usb_xhci_c::read_handler(bx_phy_address addr, unsigned len, void *data, 
   // (This only works with the first interrupter)
   if ((offset != 0x620) || (val != 0x02)) {
 #if BX_PHY_ADDRESS_LONG
-    BX_DEBUG(("register read from offset 0x%04X:  0x%08X%08X (len=%i)", offset, (Bit32u) val_hi, (Bit32u) val, len));
+    // this populates the log file, so we comment it out for now.
+    //BX_DEBUG(("register read from offset 0x%04X:  0x%08X%08X (len=%d)", offset, (Bit32u) val_hi, (Bit32u) val, len));
 #else
-    BX_DEBUG(("register read from offset 0x%04X:  0x%08X (len=%i)", offset, (Bit32u) val, len));
+    BX_DEBUG(("register read from offset 0x%04X:  0x%08X (len=%d)", offset, (Bit32u) val, len));
     if (len > 4)
-      BX_DEBUG(("Ben: In 32-bit mode, len > 4! (len=%i)", len));
+      BX_DEBUG(("Ben: In 32-bit mode, len > 4! (len=%d)", len));
 #endif
   }
   return 1;
@@ -1396,11 +1503,11 @@ bool bx_usb_xhci_c::write_handler(bx_phy_address addr, unsigned len, void *data,
   }
 
 #if BX_PHY_ADDRESS_LONG
-    BX_DEBUG(("register write to  offset 0x%04X:  0x%08X%08X (len=%i)", offset, value_hi, value, len));
+    BX_DEBUG(("register write to  offset 0x%04X:  0x%08X%08X (len=%d)", offset, value_hi, value, len));
 #else
-    BX_DEBUG(("register write to  offset 0x%04X:  0x%08X (len=%i)", offset, value, len));
+    BX_DEBUG(("register write to  offset 0x%04X:  0x%08X (len=%d)", offset, value, len));
     if (len > 4)
-      BX_DEBUG(("Ben: In 32-bit mode, len > 4! (len=%i)", len));
+      BX_DEBUG(("Ben: In 32-bit mode, len > 4! (len=%d)", len));
 #endif
 
   // Even though the controller allows reads other than 32-bits & on odd boundaries,
@@ -1479,7 +1586,7 @@ bool bx_usb_xhci_c::write_handler(bx_phy_address addr, unsigned len, void *data,
           BX_XHCI_THIS hub.op_regs.HcCommand.hcrst = 0;
           // the controller will send a reset to all USB 3.0 ports,
           //  enabling the port if a device is attached.
-          for (int port=0; port<USB_XHCI_PORTS; port++) {
+          for (unsigned int port=0; port<BX_XHCI_THIS hub.n_ports; port++) {
             if (BX_XHCI_THIS hub.usb_port[port].is_usb3) {
               reset_port_usb3(port, HOT_RESET);
             }
@@ -1627,21 +1734,21 @@ bool bx_usb_xhci_c::write_handler(bx_phy_address addr, unsigned len, void *data,
   } else
 
   // Register Port Sets
-  if ((offset >= PORT_SET_OFFSET) && (offset < (PORT_SET_OFFSET + (USB_XHCI_PORTS * 16)))) {
+  if ((offset >= PORT_SET_OFFSET) && (offset < (PORT_SET_OFFSET + (BX_XHCI_THIS hub.n_ports * 16)))) {
     unsigned port = (((offset - PORT_SET_OFFSET) >> 4) & 0x3F); // calculate port number
     switch (offset & 0x0000000F) {
       case 0x00:
         if (value & (1<<9)) {  // port power
           if (value & ((1<<30) | (1<<24) | (1<<3) | (1<<0)))
-            BX_DEBUG(("Write to one or more Read-only bits in PORTSC[%i] Register (0x%08X)", port, value));
+            BX_DEBUG(("Write to one or more Read-only bits in PORTSC[%d] Register (0x%08X)", port, value));
           if (value & ((3<<28) | (1<<2)))
-            BX_ERROR(("Write non-zero to a RsvdZ member of PORTSC[%i] Register", port));
+            BX_ERROR(("Write non-zero to a RsvdZ member of PORTSC[%d] Register", port));
           if (BX_XHCI_THIS hub.usb_port[port].is_usb3) {
             BX_XHCI_THIS hub.usb_port[port].portsc.wpr = (value & (1 << 31)) ? 1 : 0;
             BX_XHCI_THIS hub.usb_port[port].portsc.cec = (value & (1 << 23)) ? 1 : 0;
             BX_XHCI_THIS hub.usb_port[port].portsc.wrc = (value & (1 << 19)) ? 0 : BX_XHCI_THIS hub.usb_port[port].portsc.wrc;
-            if (value & (1<<18))
-              BX_ERROR(("Write to USB3 port: bit 18"));
+            if (value & (1<<18))  // For a USB3 protocol port, this bit shall never be set to 1, however doesn't hurt to write to it anyway
+              BX_DEBUG(("Write to USB3 port: bit 18"));
           } else {
             BX_XHCI_THIS hub.usb_port[port].portsc.pec = (value & (1 << 18)) ? 0 : BX_XHCI_THIS hub.usb_port[port].portsc.pec;
             if (value & ((1<<31) | (1<<23) | (1<<19)))
@@ -1662,7 +1769,7 @@ bool bx_usb_xhci_c::write_handler(bx_phy_address addr, unsigned len, void *data,
             // a "has been reset" is false.
             BX_XHCI_THIS hub.usb_port[port].has_been_reset = 0;
           }
-          BX_XHCI_THIS hub.usb_port[port].portsc.pp    = 1;
+          BX_XHCI_THIS hub.usb_port[port].portsc.pp = 1;
           if (value & (1<<16)) {  // LWS
             switch ((value & (0xF << 5)) >> 5) {
               case 0:
@@ -1702,18 +1809,18 @@ bool bx_usb_xhci_c::write_handler(bx_phy_address addr, unsigned len, void *data,
             temp = BX_XHCI_THIS hub.usb_port[port].usb3.portpmsc.RsvdP;
             BX_XHCI_THIS hub.usb_port[port].usb3.portpmsc.RsvdP = value >> 17;
             if (temp != BX_XHCI_THIS hub.usb_port[port].usb3.portpmsc.RsvdP)
-              BX_ERROR(("bits 31:17 in PORTPMSC[%i] Register were not preserved", port));
+              BX_ERROR(("bits 31:17 in PORTPMSC[%d] Register were not preserved", port));
             BX_XHCI_THIS hub.usb_port[port].usb3.portpmsc.fla   = (value & (1 << 16)) ? 1 : 0;
             BX_XHCI_THIS hub.usb_port[port].usb3.portpmsc.u2timeout = (value & (0xFF << 8)) >> 8;
             BX_XHCI_THIS hub.usb_port[port].usb3.portpmsc.u1timeout = (value & (0xFF << 0)) >> 0;
           } else {
             if (value & (7<<0))
-              BX_ERROR(("Write to one or more Read-only bits in PORTPMSC[%i] Register", port));
+              BX_ERROR(("Write to one or more Read-only bits in PORTPMSC[%d] Register", port));
             BX_XHCI_THIS hub.usb_port[port].usb2.portpmsc.tmode     = (value & (0xF << 28)) >> 28;
             temp = BX_XHCI_THIS hub.usb_port[port].usb2.portpmsc.RsvdP;
             BX_XHCI_THIS hub.usb_port[port].usb2.portpmsc.RsvdP     = (value & (0x1FFF << 15)) >> 15;
             if (temp != BX_XHCI_THIS hub.usb_port[port].usb2.portpmsc.RsvdP)
-              BX_ERROR(("bits 27:15 in PORTPMSC[%i] Register were not preserved", port));
+              BX_ERROR(("bits 27:15 in PORTPMSC[%d] Register were not preserved", port));
             BX_XHCI_THIS hub.usb_port[port].usb2.portpmsc.hle       = (value & (1 << 16)) ? 1 : 0;
             BX_XHCI_THIS hub.usb_port[port].usb2.portpmsc.l1dslot   = (value & (0xFF <<  8)) >> 8;
             BX_XHCI_THIS hub.usb_port[port].usb2.portpmsc.hird      = (value & (0xF  <<  4)) >> 4;
@@ -1725,27 +1832,27 @@ bool bx_usb_xhci_c::write_handler(bx_phy_address addr, unsigned len, void *data,
         if (BX_XHCI_THIS hub.usb_port[port].portsc.pp) {
           if (BX_XHCI_THIS hub.usb_port[port].is_usb3) {
             if (value & (0xFFFF<<0))
-              BX_ERROR(("Write to one or more Read-only bits in PORTLI[%i] Register", port));
+              BX_ERROR(("Write to one or more Read-only bits in PORTLI[%d] Register", port));
             temp = BX_XHCI_THIS hub.usb_port[port].usb3.portli.RsvdP;
             BX_XHCI_THIS hub.usb_port[port].usb3.portli.RsvdP = value >> 16;
             if (temp != BX_XHCI_THIS hub.usb_port[port].usb3.portli.RsvdP)
-              BX_ERROR(("bits 31:16 in PORTLI[%i] Register were not preserved", port));
+              BX_ERROR(("bits 31:16 in PORTLI[%d] Register were not preserved", port));
           } else {
             temp = BX_XHCI_THIS hub.usb_port[port].usb2.portli.RsvdP;
             BX_XHCI_THIS hub.usb_port[port].usb2.portli.RsvdP = value;
             if (temp != BX_XHCI_THIS hub.usb_port[port].usb2.portli.RsvdP)
-              BX_ERROR(("bits 31:0 in PORTLI[%i] Register were not preserved", port));
+              BX_ERROR(("bits 31:0 in PORTLI[%d] Register were not preserved", port));
           }
         }
         break;
       case 0x0C:
 #if ((VERSION_MAJOR < 1) || ((VERSION_MAJOR == 1) && (VERSION_MINOR == 0)))
-        BX_ERROR(("Write to Reserved Register in Port Register Set %i", port));
+        BX_ERROR(("Write to Reserved Register in Port Register Set %d", port));
 #else
         temp = BX_XHCI_THIS hub.usb_port[port].porthlpmc.RsvdP;
         BX_XHCI_THIS hub.usb_port[port].porthlpmc.RsvdP = (value >> 14);
         if (temp != BX_XHCI_THIS hub.usb_port[port].porthlpmc.RsvdP)
-          BX_ERROR(("bits 31:14 in PORTHLPMC[%i] Register were not preserved", port));
+          BX_ERROR(("bits 31:14 in PORTHLPMC[%d] Register were not preserved", port));
         BX_XHCI_THIS hub.usb_port[port].porthlpmc.hirdd = ((value & (0x0F << 10)) >> 10);
         BX_XHCI_THIS hub.usb_port[port].porthlpmc.l1timeout = ((value & (0xFF << 2)) >> 2);
         BX_XHCI_THIS hub.usb_port[port].porthlpmc.hirdm = ((value & (0x0F << 0)) >> 0);
@@ -1879,16 +1986,97 @@ bool bx_usb_xhci_c::write_handler(bx_phy_address addr, unsigned len, void *data,
       // doorbell = slot to use (1 based)
       // (value & 0xFF) = ep (1 = control, 2 = ep1 out, 3 = ep1 in, etc);
       int ep = (value & 0xFF);
-      BX_DEBUG(("Rang Doorbell:  slot = %i  ep = %i (%s)", doorbell, ep, (ep & 1) ? "IN" : "OUT"));
-      if (ep > 31)
-        BX_ERROR(("Doorbell rang with EP > 31  (ep = %i)", ep));
-      else
-        process_transfer_ring(doorbell, ep);
+      BX_DEBUG(("Rang Doorbell:  slot = %d  ep = %d (%s)", doorbell, ep, (ep & 1) ? "IN" : "OUT"));
+      if (ep > 31) {
+        BX_ERROR(("Doorbell rang with EP > 31  (ep = %d)", ep));
+      } else {
+#if MAX_PSA_SIZE > 0
+        // is this endpoint using streams?
+        if (BX_XHCI_THIS hub.slots[doorbell].ep_context[ep].ep_context.max_pstreams > 0) {   // specifying streams
+          // the ep must be a super-speed bulk endpoint
+          if ((BX_XHCI_THIS hub.slots[doorbell].slot_context.speed == XHCI_SPEED_SUPER) &&   // is a super-speed device
+             ((BX_XHCI_THIS hub.slots[doorbell].ep_context[ep].ep_context.ep_type == 2) ||   // is a bulk out
+              (BX_XHCI_THIS hub.slots[doorbell].ep_context[ep].ep_context.ep_type == 6))) {  //   or bulk in
+            // if the lsa bit is set, use primary streams only
+            if (BX_XHCI_THIS hub.slots[doorbell].ep_context[ep].ep_context.lsa == 1) {
+              unsigned primary_id = PSA_PRIMARY_MASK(value, BX_XHCI_THIS hub.slots[doorbell].ep_context[ep].ep_context.max_pstreams);
+              if ((primary_id > 0) && (primary_id < MAX_PSA_SIZE_NUM) &&
+                  (primary_id < PSA_MAX_SIZE_NUM(BX_XHCI_THIS hub.slots[doorbell].ep_context[ep].ep_context.max_pstreams)) &&
+                   BX_XHCI_THIS hub.slots[doorbell].ep_context[ep].stream[primary_id].valid == 1) {
+                BX_XHCI_THIS hub.slots[doorbell].ep_context[ep].stream[primary_id].tr_dequeue_pointer =
+                  BX_XHCI_THIS process_transfer_ring(doorbell, ep, BX_XHCI_THIS hub.slots[doorbell].ep_context[ep].stream[primary_id].tr_dequeue_pointer, 
+                                                                  &BX_XHCI_THIS hub.slots[doorbell].ep_context[ep].stream[primary_id].dcs, primary_id);
+              } else {
+                BX_ERROR(("Stream Context with bad Primary Stream ID (%d)", primary_id));
+                // no TRB is associated, so can't include a TRB address. Does this make the EventTRB invalid?
+                //write_event_TRB(0, 0, TRB_SET_COMP_CODE(INVALID_STREAM_ID), TRB_SET_SLOT(doorbell) | TRB_SET_EP(ep) | TRB_SET_TYPE(TRANS_EVENT), 1);
+                //BX_XHCI_THIS hub.slots[doorbell].ep_context[ep].ep_context.ep_state = EP_STATE_HALTED; // call a function to do this correctly.
+              }
+            } else {
+  #if NO_SSD_SUPPORT
+              BX_ERROR(("The EP's context lsa bit is zero. Secondary Streams are not supported."));
+  #else
+              // secondary streams are used
+              unsigned primary_id = PSA_PRIMARY_MASK(value, BX_XHCI_THIS hub.slots[doorbell].ep_context[ep].ep_context.max_pstreams);
+              unsigned secondary_id = PSA_SECONDARY_MASK(value, BX_XHCI_THIS hub.slots[doorbell].ep_context[ep].ep_context.max_pstreams);
+              BX_ERROR(("The EP's context lsa bit is set. Secondary Streams are not yet supported."));
+              // TODO:
+  #endif
+            }
+          } else {
+            BX_ERROR(("EP:MaxPStream > 0 on a non-Bulk SS device endpoint"));
+          }
+        } else {
+#endif
+          // standard trb ring
+          BX_XHCI_THIS hub.slots[doorbell].ep_context[ep].enqueue_pointer =
+            BX_XHCI_THIS process_transfer_ring(doorbell, ep, BX_XHCI_THIS hub.slots[doorbell].ep_context[ep].enqueue_pointer, 
+                                                            &BX_XHCI_THIS hub.slots[doorbell].ep_context[ep].rcs, 0);
+#if MAX_PSA_SIZE > 0
+        }
+#endif
+      }
     }
   } else
-    BX_ERROR(("register write to unknown offset 0x%08X:  0x%08X%08X (len=%i)", offset, (Bit32u) value_hi, (Bit32u) value, len));
+    BX_ERROR(("register write to unknown offset 0x%08X:  0x%08X%08X (len=%d)", offset, (Bit32u) value_hi, (Bit32u) value, len));
 
   return 1;
+}
+
+void bx_usb_xhci_c::get_stream_info(struct STREAM_CONTEXT *context, const Bit64u address, const int index) {
+  struct STREAM_CONTEXT stream_context;
+  Bit8u buffer[16];
+
+  // the first stream context is reserved
+  if ((index > 0) && (index < MAX_PSA_SIZE_NUM)) {
+    // read in the stream context
+    DEV_MEM_READ_PHYSICAL((bx_phy_address) address + (index * 16), 16, buffer);
+    copy_stream_from_buffer(&stream_context, buffer);
+    if ((stream_context.sct == 1) && (stream_context.tr_dequeue_pointer != 0)) {
+      context->valid = 1; // mark that this is a valid stream context
+      context->tr_dequeue_pointer = stream_context.tr_dequeue_pointer;
+      context->dcs = stream_context.dcs;
+      context->sct = stream_context.sct;
+    } else {
+#if NO_SSD_SUPPORT
+      context->valid = 0;
+      BX_DEBUG(("Stream Context index %d with SCT != 1 (%d)", index, stream_context.sct));
+#else
+      BX_DEBUG(("Stream Context index %d with SCT == 0 (%d)...Secondary Streams not yet supported.", index));
+#endif
+    }
+  }
+}
+
+void bx_usb_xhci_c::put_stream_info(struct STREAM_CONTEXT *context, const Bit64u address, const int index) {
+  Bit8u buffer[16];
+
+  // the first stream context is reserved
+  if ((index > 0) && (index < MAX_PSA_SIZE_NUM)) {
+    copy_stream_to_buffer(buffer, context);
+    // write the stream context
+    DEV_MEM_WRITE_PHYSICAL((bx_phy_address) address + (index * 16), 16, buffer);
+  }
 }
 
 void xhci_event_handler(int event, USBPacket *packet, void *dev, int port)
@@ -1906,7 +2094,16 @@ void bx_usb_xhci_c::event_handler(int event, USBPacket *packet, int port)
     p->done = 1;
     slot = (p->slot_ep >> 8);
     ep = (p->slot_ep & 0xff);
-    BX_XHCI_THIS process_transfer_ring(slot, ep);
+    if (BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.max_pstreams > 0) {   // specifying streams
+      BX_DEBUG(("Event Handler: USB_EVENT_ASYNC: slot %d, ep %d, stream ID %d", slot, ep, p->packet.strm_pid));
+      BX_XHCI_THIS hub.slots[slot].ep_context[ep].stream[p->packet.strm_pid].tr_dequeue_pointer =
+        BX_XHCI_THIS process_transfer_ring(slot, ep, BX_XHCI_THIS hub.slots[slot].ep_context[ep].stream[p->packet.strm_pid].tr_dequeue_pointer, 
+                                                    &BX_XHCI_THIS hub.slots[slot].ep_context[ep].stream[p->packet.strm_pid].dcs, p->packet.strm_pid);
+    } else {
+      BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer =
+        BX_XHCI_THIS process_transfer_ring(slot, ep, BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer,
+                                                    &BX_XHCI_THIS hub.slots[slot].ep_context[ep].rcs, 0);
+    }
   } else if (event == USB_EVENT_WAKEUP) {
     if (BX_XHCI_THIS hub.usb_port[port].portsc.pls != PLS_U3_SUSPENDED) {
       return;
@@ -1925,7 +2122,7 @@ void bx_usb_xhci_c::event_handler(int event, USBPacket *packet, int port)
 }
 
 // This function checks and processes all enqueued TRB's in the EP's transfer ring
-void bx_usb_xhci_c::process_transfer_ring(const int slot, const int ep)
+Bit64u bx_usb_xhci_c::process_transfer_ring(const int slot, const int ep, Bit64u ring_addr, bool *rcs, const int primary_sid)
 {
   struct TRB trb;
   Bit64u address = 0, org_addr;
@@ -1950,16 +2147,16 @@ void bx_usb_xhci_c::process_transfer_ring(const int slot, const int ep)
   // if the ep is disabled, return an error event trb.
   if ((BX_XHCI_THIS hub.slots[slot].slot_context.slot_state == SLOT_STATE_DISABLED_ENABLED)
     || (BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.ep_state == EP_STATE_DISABLED)) {
-    org_addr = BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer;
+    org_addr = ring_addr;
     write_event_TRB(0, org_addr, TRB_SET_COMP_CODE(EP_NOT_ENABLED),
       TRB_SET_SLOT(slot) | TRB_SET_EP(ep) | TRB_SET_TYPE(TRANS_EVENT), 1);
-    return;
+    return ring_addr;
   }
 
   // if the ep is in the halted or error state, ignore the doorbell ring.
   if ((BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.ep_state == EP_STATE_HALTED)
     || (BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.ep_state == EP_STATE_ERROR))
-    return;
+    return ring_addr;
 
   // if the ep_context::type::direction field is not correct for the ep type of this ep, then ignore the doorbell
   if (ep >= 2) {
@@ -1967,7 +2164,7 @@ void bx_usb_xhci_c::process_transfer_ring(const int slot, const int ep)
     int ep_type = (ep & 1) ? EP_DIR_IN : EP_DIR_OUT;
     if (endpoint_dir[BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.ep_type] != ep_type) {
       BX_ERROR(("Endpoint_context::Endpoint_type::direction is not correct for this endpoint number.  Ignoring doorbell ring."));
-      return;
+      return ring_addr;
     }
   }
 
@@ -1979,14 +2176,11 @@ void bx_usb_xhci_c::process_transfer_ring(const int slot, const int ep)
   }
 
   // read in the TRB
-  read_TRB((bx_phy_address) BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer, &trb);
-  BX_DEBUG(("Found TRB: address = 0x" FORMATADDRESS " 0x" FMT_ADDRX64 " 0x%08X 0x%08X  %i",
-    (bx_phy_address) BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer,
-    trb.parameter, trb.status, trb.command, BX_XHCI_THIS hub.slots[slot].ep_context[ep].rcs));
-  while ((trb.command & 1) == BX_XHCI_THIS hub.slots[slot].ep_context[ep].rcs) {
-    org_addr = BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer;
-    BX_DEBUG(("Found TRB: address = 0x" FORMATADDRESS " 0x" FMT_ADDRX64 " 0x%08X 0x%08X  %i (SPD occurred = %i)",
-      (bx_phy_address) org_addr, trb.parameter, trb.status, trb.command, BX_XHCI_THIS hub.slots[slot].ep_context[ep].rcs, spd_occurred));
+  read_TRB((bx_phy_address) ring_addr, &trb);
+  while ((trb.command & 1) == *rcs) {
+    org_addr = ring_addr;
+    BX_DEBUG(("Found TRB: address = 0x" FORMATADDRESS " 0x" FMT_ADDRX64 " 0x%08X 0x%08X  %d (SPD occurred = %d)",
+      (bx_phy_address) org_addr, trb.parameter, trb.status, trb.command, *rcs, spd_occurred));
     trb_count++;
     // these are used in some/most items.
     // If not used, won't hurt to extract bad data.
@@ -1996,7 +2190,7 @@ void bx_usb_xhci_c::process_transfer_ring(const int slot, const int ep)
     is_transfer_trb = 0;  // assume not a transfer
     ioc = TRB_IOC(trb.command);
 
-    // if a SPD occurred, we only process the LINK and EVENT TRB's in this TD, until either on of these two or end of TD
+    // if a SPD occurred, we only process the LINK and EVENT TRB's in this TD, until either one of these two or end of TD
     if (!spd_occurred ||
        (spd_occurred && ((TRB_GET_TYPE(trb.command) == LINK) || (TRB_GET_TYPE(trb.command) == EVENT_DATA)))) {
       // is the data in trb.parameter? (Immediate data?)
@@ -2012,23 +2206,23 @@ void bx_usb_xhci_c::process_transfer_ring(const int slot, const int ep)
           if (ioc)
             write_event_TRB(int_target, org_addr, TRB_SET_COMP_CODE(TRB_SUCCESS), TRB_SET_TYPE(LINK), 1);
           if (TRB_TOGGLE(trb.command))
-            BX_XHCI_THIS hub.slots[slot].ep_context[ep].rcs ^= 1;
-          BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer = trb.parameter & (Bit64u) ~0xF;
-          BX_DEBUG(("0x" FORMATADDRESS ": Transfer Ring (slot = %i) (ep = %i): LINK TRB:  New dq_pointer = 0x" FMT_ADDRX64 " (%i)",
-            (bx_phy_address) org_addr, slot, ep, BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer, BX_XHCI_THIS hub.slots[slot].ep_context[ep].rcs));
+            (*rcs) ^= 1;
+          ring_addr = trb.parameter & (Bit64u) ~0xF;
+          BX_DEBUG(("0x" FORMATADDRESS ": Transfer Ring (slot = %d) (ep = %d): LINK TRB:  New dq_pointer = 0x" FMT_ADDRX64 " (%d)",
+            (bx_phy_address) org_addr, slot, ep, ring_addr, *rcs));
 #if ((VERSION_MAJOR == 0) && (VERSION_MINOR == 0x95))
           // https://patchwork.kernel.org/patch/51191/
           if (!TRB_CHAIN(trb.command))
             BX_DEBUG(("Chain Bit in Link TRB not set."));
 #endif
-          read_TRB((bx_phy_address) BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer, &trb);
+          read_TRB((bx_phy_address) ring_addr, &trb);
           continue;
 
         // Setup Stage TRB
         case SETUP_STAGE:
           cur_direction = USB_TOKEN_SETUP;
           is_transfer_trb = 1;
-          BX_DEBUG(("0x" FORMATADDRESS ": Transfer Ring (slot = %i) (ep = %i) (len = %i): Found SETUP TRB",
+          BX_DEBUG(("0x" FORMATADDRESS ": Transfer Ring (slot = %d) (ep = %d) (len = %d): Found SETUP TRB",
             (bx_phy_address) org_addr, slot, ep, transfer_length));
           break;
 
@@ -2036,7 +2230,7 @@ void bx_usb_xhci_c::process_transfer_ring(const int slot, const int ep)
         case DATA_STAGE:
           cur_direction = TRB_GET_DIR(trb.command);
           is_transfer_trb = 1;
-          BX_DEBUG(("0x" FORMATADDRESS ": Transfer Ring (slot = %i) (ep = %i) (len = %i): Found DATA STAGE TRB",
+          BX_DEBUG(("0x" FORMATADDRESS ": Transfer Ring (slot = %d) (ep = %d) (len = %d): Found DATA STAGE TRB",
             (bx_phy_address) org_addr, slot, ep, transfer_length));
           break;
 
@@ -2045,14 +2239,14 @@ void bx_usb_xhci_c::process_transfer_ring(const int slot, const int ep)
           cur_direction = TRB_GET_DIR(trb.command);
           is_transfer_trb = 1;
           transfer_length = 0;
-          BX_DEBUG(("0x" FORMATADDRESS ": Transfer Ring (slot = %i) (ep = %i): Found STATUS STAGE TRB",
+          BX_DEBUG(("0x" FORMATADDRESS ": Transfer Ring (slot = %d) (ep = %d): Found STATUS STAGE TRB",
             (bx_phy_address) org_addr, slot, ep));
           break;
 
         // Normal TRB
         case NORMAL:
           is_transfer_trb = 1;
-          BX_DEBUG(("0x" FORMATADDRESS ": Transfer Ring (slot = %i) (ep = %i) (len = %i): Found NORMAL TRB",
+          BX_DEBUG(("0x" FORMATADDRESS ": Transfer Ring (slot = %d) (ep = %d) (len = %d): Found NORMAL TRB",
             (bx_phy_address) org_addr, slot, ep, transfer_length));
           break;
 
@@ -2076,13 +2270,13 @@ void bx_usb_xhci_c::process_transfer_ring(const int slot, const int ep)
             first_event_trb_encountered = 1;
 #endif
 
-          BX_DEBUG(("0x" FORMATADDRESS ": Transfer Ring (slot = %i) (ep = %i) (trnsfrd = %i): Found EVENT_DATA TRB: (returning %i)",
+          BX_DEBUG(("0x" FORMATADDRESS ": Transfer Ring (slot = %d) (ep = %d) (trnsfrd = %d): Found EVENT_DATA TRB: (returning %d)",
             (bx_phy_address) org_addr, slot, ep, BX_XHCI_THIS hub.slots[slot].ep_context[ep].edtla, comp_code));
           break;
 
         // No Op (transfer ring) TRB (Sect: 6.4.1.4)
         case NO_OP:
-          BX_DEBUG(("0x" FORMATADDRESS ": Transfer Ring (slot = %i) (ep = %i): Found No Op TRB",
+          BX_DEBUG(("0x" FORMATADDRESS ": Transfer Ring (slot = %d) (ep = %d): Found No Op TRB",
             (bx_phy_address) org_addr, slot, ep));
           cur_direction = 0;
           is_transfer_trb = 1;
@@ -2091,18 +2285,18 @@ void bx_usb_xhci_c::process_transfer_ring(const int slot, const int ep)
 
         // unknown TRB type
         default:
-          BX_ERROR(("0x" FORMATADDRESS ": Transfer Ring (slot = %i) (ep = %i): Unknown TRB found.",
+          BX_ERROR(("0x" FORMATADDRESS ": Transfer Ring (slot = %d) (ep = %d): Unknown TRB found.",
             (bx_phy_address) org_addr, slot, ep));
-          BX_ERROR(("Unknown trb type found: %i(dec)  (0x" FMT_ADDRX64 " 0x%08X 0x%08X)", TRB_GET_TYPE(trb.command),
+          BX_ERROR(("Unknown trb type found: %d  (0x" FMT_ADDRX64 " 0x%08X 0x%08X)", TRB_GET_TYPE(trb.command),
             trb.parameter, trb.status, trb.command));
       }
 
       // is there a transfer to be done?
       if (is_transfer_trb) {
-        p = find_async_packet(&BX_XHCI_THIS packets, org_addr);
+        p = find_async_packet(&BX_XHCI_THIS packets, ring_addr);
         bool completion = (p != NULL);
         if (completion && !p->done) {
-          return;
+          return ring_addr;
         }
         comp_code = TRB_SUCCESS;  // assume good trans event
         if (completion) {
@@ -2113,8 +2307,13 @@ void bx_usb_xhci_c::process_transfer_ring(const int slot, const int ep)
           p->packet.pid = cur_direction;
           p->packet.devaddr = BX_XHCI_THIS hub.slots[slot].slot_context.device_address;
           p->packet.devep = (ep >> 1);
+          p->packet.speed = broadcast_speed(slot);
+#if HANDLE_TOGGLE_CONTROL
+          p->packet.toggle = -1; // the xHCI handles the data toggle bit for USB2 devices
+#endif
           p->packet.complete_cb = xhci_event_handler;
           p->packet.complete_dev = BX_XHCI_THIS_PTR;
+          p->packet.strm_pid = primary_sid;
           p->slot_ep = (slot << 8) | ep;
           switch (cur_direction) {
             case USB_TOKEN_OUT:
@@ -2133,7 +2332,7 @@ void bx_usb_xhci_c::process_transfer_ring(const int slot, const int ep)
               } else {
                 ret = BX_XHCI_THIS broadcast_packet(&p->packet, port_num - 1);
                 len = transfer_length;
-                BX_DEBUG(("OUT: Transferred %i bytes (ret = %i)", len, ret));
+                BX_DEBUG(("OUT: Transferred %d bytes (ret = %d)", len, ret));
               }
               break;
             case USB_TOKEN_IN:
@@ -2151,7 +2350,7 @@ void bx_usb_xhci_c::process_transfer_ring(const int slot, const int ep)
             BX_XHCI_THIS hub.slots[slot].ep_context[ep].edtla += len;
             if (len > 0)
               DEV_MEM_WRITE_PHYSICAL_DMA((bx_phy_address) address, len, p->packet.data);
-            BX_DEBUG(("IN: Transferred %i bytes, requested %i bytes", len, transfer_length));
+            BX_DEBUG(("IN: Transferred %d bytes, requested %d bytes", len, transfer_length));
             if (len < (int) transfer_length) {
               bytes_not_transferred = transfer_length - len;
               spd_occurred = 1;
@@ -2177,7 +2376,7 @@ void bx_usb_xhci_c::process_transfer_ring(const int slot, const int ep)
           // If we are a high-speed device, and a SETUP packet, we need to
           // return a comp_code of TRANSACTION_ERROR instead of breaking out.
           if ((cur_direction == USB_TOKEN_SETUP) &&
-              (BX_XHCI_THIS hub.slots[slot].slot_context.speed == SPEED_HI))
+              (BX_XHCI_THIS hub.slots[slot].slot_context.speed == XHCI_SPEED_HIGH))
             comp_code = TRANSACTION_ERROR;
           else {
             // if the device NAK'ed, we retry with given interval
@@ -2197,7 +2396,7 @@ void bx_usb_xhci_c::process_transfer_ring(const int slot, const int ep)
         if (ioc) {
           if ((comp_code == TRB_SUCCESS) && spd_occurred && TRB_SPD(trb.command)) {
             comp_code = SHORT_PACKET;
-            BX_DEBUG(("Sending Short Packet Detect Event TRB (%i)", bytes_not_transferred));
+            BX_DEBUG(("Sending Short Packet Detect Event TRB (%d)", bytes_not_transferred));
           }
           // create a Event TRB
           write_event_TRB(int_target, org_addr, TRB_SET_COMP_CODE(comp_code) | bytes_not_transferred,
@@ -2213,13 +2412,16 @@ void bx_usb_xhci_c::process_transfer_ring(const int slot, const int ep)
     }
 
     // advance the Dequeue pointer and continue;
-    BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer += 16;
-    read_TRB((bx_phy_address) BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer, &trb);
+    ring_addr += 16;
+    read_TRB((bx_phy_address) ring_addr, &trb);
   }
 
-  BX_DEBUG(("Process Transfer Ring: Processed %i TRB's", trb_count));
+  BX_DEBUG(("Process Transfer Ring: Processed %d TRB's", trb_count));
   if (trb_count == 0)
     BX_ERROR(("Process Transfer Ring: Doorbell rang, but no TRB's were enqueued in the ring."));
+
+  // return the new address
+  return ring_addr;
 }
 
 // This function call starts at the current position in the Command Ring,
@@ -2230,8 +2432,9 @@ void bx_usb_xhci_c::process_transfer_ring(const int slot, const int ep)
 void bx_usb_xhci_c::process_command_ring(void)
 {
   struct TRB trb;
-  int i, slot, /*slot_type,*/ ep, comp_code = 0, new_addr = 0, bsr = 0;
-  Bit32u a_flags = 0, d_flags, tmpval1, tmpval2;
+  unsigned i, j;
+  int slot, ep, comp_code = 0, new_addr = 0, bsr = 0, trb_command;
+  Bit32u a_flags, d_flags;
   Bit64u org_addr;
   Bit8u buffer[CONTEXT_SIZE + (32 * CONTEXT_SIZE)];
   struct SLOT_CONTEXT slot_context;
@@ -2242,11 +2445,12 @@ void bx_usb_xhci_c::process_command_ring(void)
 
   // read in the TRB
   read_TRB((bx_phy_address) BX_XHCI_THIS hub.ring_members.command_ring.dq_pointer, &trb);
-  BX_DEBUG(("Dump command trb: %i(dec)  (0x" FMT_ADDRX64 " 0x%08X 0x%08X) (%i)", TRB_GET_TYPE(trb.command),
+  BX_DEBUG(("Dump command trb: %d  (0x" FMT_ADDRX64 " 0x%08X 0x%08X) (%d)", TRB_GET_TYPE(trb.command),
     trb.parameter, trb.status, trb.command, BX_XHCI_THIS hub.ring_members.command_ring.rcs));
   while ((trb.command & 1) == BX_XHCI_THIS hub.ring_members.command_ring.rcs) {
     org_addr = BX_XHCI_THIS hub.ring_members.command_ring.dq_pointer;
-    switch (TRB_GET_TYPE(trb.command)) {
+    trb_command = TRB_GET_TYPE(trb.command);
+    switch (trb_command) {
       // is a LINK trb.
       case LINK:
         // Chain bit and Interrupter Target fields are ignored in Command Rings (Page 370)
@@ -2255,7 +2459,7 @@ void bx_usb_xhci_c::process_command_ring(void)
           write_event_TRB(0, org_addr, TRB_SET_COMP_CODE(TRB_SUCCESS), TRB_SET_SLOT(0) | TRB_SET_TYPE(LINK), 1);
         if (TRB_TOGGLE(trb.command))
           BX_XHCI_THIS hub.ring_members.command_ring.rcs ^= 1;
-        BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: Found LINK TRB:  New dq_pointer = 0x" FORMATADDRESS " (%i)",
+        BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: Found LINK TRB:  New dq_pointer = 0x" FORMATADDRESS " (%d)",
           (bx_phy_address) org_addr, (bx_phy_address) BX_XHCI_THIS hub.ring_members.command_ring.dq_pointer,
           BX_XHCI_THIS hub.ring_members.command_ring.rcs));
         read_TRB((bx_phy_address) BX_XHCI_THIS hub.ring_members.command_ring.dq_pointer, &trb);
@@ -2264,38 +2468,55 @@ void bx_usb_xhci_c::process_command_ring(void)
       // NEC: Get Firmware version
       case NEC_TRB_TYPE_GET_FW:
         write_event_TRB(0, org_addr, TRB_SET_COMP_CODE(1) | 0x3021, TRB_SET_SLOT(0) | TRB_SET_TYPE(NEC_TRB_TYPE_CMD_COMP), 1);
-        BX_INFO(("NEC GET Firmware Version TRB found.  Returning 0x3021"));
+        BX_DEBUG(("NEC GET Firmware Version TRB found.  Returning 0x3021"));
         break;
 
       /* NEC: Get Verification
        * The NEC/Renesas driver sends a vendor specific TRB to the controller to
-       *  verify that the controller is indeed a NEC/Renesas controller.  I do not
-       *  have permission from NEC/Renesas to show the code that returns the correct
-       *  verification values.  Therefore, this simply returns.  As long as you are
-       *  not using a Windows driver, everything will be fine.
+       *  verify that the controller is indeed a NEC/Renesas controller.
+       * A 64-bit value is sent in the TRB.Param field and a 32-bit value is returned.
+       *  (A 16-bit value in the high-order of TRB.Command and a 16-bit value in
+       *   the low-order of TRB.Status)
+       * I do not have permission from NEC/Renesas to show the code that calculates and
+       *  returns the correct verification values.  Therefore, this simply returns.  
+       * As long as you are not using a compatible NEC/Renesas driver, everything 
+       *  should be fine.
        */
       case NEC_TRB_TYPE_GET_UN:
-        BX_INFO(("NEC GET Verification TRB found."));
+        BX_DEBUG(("NEC GET Verification TRB found."));
+        break;
+        
+      /* Bochs Dump Controller command:
+       * This command simply dumps the controller's contents to the debug file.
+       * This is useful for displaying the controller before and then after a given command.
+       * This uses the 8-byte Parameter member of the TRB to pass arguments:
+       *   bits 4:0 - zero based highest slot number to dump (1,2,3,...31)
+       *   bits 8:5 - zero based highest endpoint to dump (1,2,3,...15)
+       * This command sends a Command Completion on the Event Ring.
+       */
+      case BX_TRB_TYPE_DUMP:
+        BX_INFO(("BX_TRB_TYPE_DUMP TRB found.  Dumping the core."));
+        dump_xhci_core((trb.parameter >> 0) & 0x1F, (trb.parameter >> 5) & 0xF);
+        write_event_TRB(0, 0x0, TRB_SET_COMP_CODE(TRB_SUCCESS), TRB_SET_SLOT(0) | TRB_SET_TYPE(COMMAND_COMPLETION), 1);
         break;
 
       case ENABLE_SLOT:
         comp_code = NO_SLOTS_ERROR;  // assume no slots
         slot = 0;
-//      slot_type = TRB_GET_STYPE(trb.command);  // currently not used
         for (i=1; i<MAX_SLOTS; i++) {  // slots are one based
           if (BX_XHCI_THIS hub.slots[i].enabled == 0) {
             memset(&BX_XHCI_THIS hub.slots[i], 0, sizeof(struct HC_SLOT_CONTEXT));
             BX_XHCI_THIS hub.slots[i].slot_context.slot_state = SLOT_STATE_DISABLED_ENABLED;
             BX_XHCI_THIS hub.slots[i].enabled = 1;
             slot = i;
-            for (i=1; i<32; i++)
-              BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.ep_state = EP_STATE_DISABLED;
+            for (j=1; j<32; j++)
+              BX_XHCI_THIS hub.slots[i].ep_context[j].ep_context.ep_state = EP_STATE_DISABLED;
             comp_code = TRB_SUCCESS;
             break;
           }
         }
         write_event_TRB(0, org_addr, TRB_SET_COMP_CODE(comp_code), TRB_SET_SLOT(slot) | TRB_SET_TYPE(COMMAND_COMPLETION), 1);
-        BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: Found Enable Slot TRB (slot = %i) (returning %i)",
+        BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: Found Enable Slot TRB (slot = %d) (returning %d)",
           (bx_phy_address) org_addr, slot, comp_code));
         break;
 
@@ -2314,24 +2535,27 @@ void bx_usb_xhci_c::process_command_ring(void)
           comp_code = SLOT_NOT_ENABLED;
 
         write_event_TRB(0, org_addr, TRB_SET_COMP_CODE(comp_code), TRB_SET_SLOT(slot) | TRB_SET_TYPE(COMMAND_COMPLETION), 1);
-        BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: Found Disable Slot TRB (slot = %i) (returning %i)",
+        BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: Found Disable Slot TRB (slot = %d) (returning %d)",
           (bx_phy_address) org_addr, slot, comp_code));
         break;
 
       case ADDRESS_DEVICE:
         slot = TRB_GET_SLOT(trb.command);  // slots are 1 based
         if (BX_XHCI_THIS hub.slots[slot].enabled == 1) {
-          get_dwords((bx_phy_address) trb.parameter, (Bit32u*)buffer, (CONTEXT_SIZE + (CONTEXT_SIZE * 2)) >> 2);
+          get_dwords((bx_phy_address) trb.parameter, (Bit32u *) buffer, (CONTEXT_SIZE + (CONTEXT_SIZE * 2)) >> 2);
           bsr = ((trb.command & (1<<9)) == (1<<9));
-          DEV_MEM_READ_PHYSICAL((bx_phy_address) trb.parameter,     4, (Bit8u*)&tmpval1);
-          DEV_MEM_READ_PHYSICAL((bx_phy_address) trb.parameter + 4, 4, (Bit8u*)&tmpval2);
-          if ((tmpval1 == 0x00) && (tmpval2 == 0x03)) {
+          d_flags = * (Bit32u *) &buffer[0];
+          a_flags = * (Bit32u *) &buffer[4];
+          if (((d_flags & 0x03) == 0) && ((a_flags & 0x03) == 3)) {
+            if ((d_flags & ~0x03) || (a_flags & ~0x03)) {
+              BX_ERROR(("D2->D31 and A2->A31 must be zero..."));
+            }
             // Use temporary slot and ep context incase there is an error we don't modify the main contexts
             copy_slot_from_buffer(&slot_context, &buffer[CONTEXT_SIZE]);
             copy_ep_from_buffer(&ep_context, &buffer[CONTEXT_SIZE + CONTEXT_SIZE]);
-            // Only check for valid context on the first issued ADDRESS_DEVICE command
-            if ((BX_XHCI_THIS hub.slots[slot].sent_address == 1) ||
-                ((validate_slot_context(&slot_context) && validate_ep_context(&ep_context, -1, 1)))) {
+            // check that the Input contexts are valid
+            if ((validate_slot_context(&slot_context, trb_command, slot) == TRB_SUCCESS) && 
+                (validate_ep_context(&ep_context, trb_command, 0, slot_context.rh_port_num - 1, 1) == TRB_SUCCESS)) {
               if (bsr == 1) { // BSR flag set
                 if (BX_XHCI_THIS hub.slots[slot].slot_context.slot_state == SLOT_STATE_DISABLED_ENABLED) {
                   slot_context.slot_state = SLOT_STATE_DEFAULT;
@@ -2344,7 +2568,7 @@ void bx_usb_xhci_c::process_command_ring(void)
                 if (BX_XHCI_THIS hub.slots[slot].slot_context.slot_state <= SLOT_STATE_DEFAULT) {
                   int port_num = slot_context.rh_port_num - 1;  // slot:port_num is 1 based
                   new_addr = create_unique_address(slot);
-                  if (send_set_address(new_addr, port_num) == 0) {
+                  if (send_set_address(new_addr, port_num, slot) == 0) {
                     slot_context.slot_state = SLOT_STATE_ADDRESSED;
                     slot_context.device_address = new_addr;
                     ep_context.ep_state = EP_STATE_RUNNING;
@@ -2370,157 +2594,127 @@ void bx_usb_xhci_c::process_command_ring(void)
           BX_XHCI_THIS hub.slots[slot].ep_context[1].rcs = ep_context.dcs;
           update_slot_context(slot);
           update_ep_context(slot, 1);
-          // mark that we have done this once before
-          BX_XHCI_THIS hub.slots[slot].sent_address = 1;
         }
 
         write_event_TRB(0, org_addr, TRB_SET_COMP_CODE(comp_code), TRB_SET_SLOT(slot) | TRB_SET_TYPE(COMMAND_COMPLETION), 1);
         //BX_INFO(("ADDRESS_DEVICE TRB: 0x" FMT_ADDRX64 "  0x%08X 0x%08X", trb.parameter, trb.status, trb.command));
-        BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: SetAddress TRB (bsr = %i) (addr = %i) (slot = %i) (returning %i)",
+        BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: SetAddress TRB (bsr = %d) (addr = %d) (slot = %d) (returning %d)",
           (bx_phy_address) org_addr, bsr, new_addr, slot, comp_code));
         break;
 
-      case EVALUATE_CONTEXT: {
-          slot = TRB_GET_SLOT(trb.command);  // slots are 1 based
-          if (BX_XHCI_THIS hub.slots[slot].enabled == 1) {
-            get_dwords((bx_phy_address) trb.parameter, (Bit32u*)buffer, (CONTEXT_SIZE + (CONTEXT_SIZE * 32)) >> 2);
-            DEV_MEM_READ_PHYSICAL((bx_phy_address) trb.parameter + 4, 4, (Bit8u*)&a_flags);
-            // only the Slot context and EP1 (control EP) contexts are evaluated. Section 6.2.3.3
-            // If the slot is not addressed or configured, then return error
-            // XHCI specs 1.0, page 102 says DEFAULT or higher, while page 321 states higher than DEFAULT!!!
-            //  (specs 1.1 removed the DEFAULT word and require it to be greater than the DEFAULT state)
+      case EVALUATE_CONTEXT:
+        slot = TRB_GET_SLOT(trb.command);  // slots are 1 based
+        if (BX_XHCI_THIS hub.slots[slot].enabled == 1) {
+          get_dwords((bx_phy_address) trb.parameter, (Bit32u *) buffer, (CONTEXT_SIZE + (CONTEXT_SIZE * 32)) >> 2);
+          a_flags = * (Bit32u *) &buffer[4];
+          // only the Slot context and EP0 (control EP) contexts are evaluated. Section 6.2.3.3, p326
+          // If the slot is not addressed or configured, then return error
+          // XHCI specs 1.0, page 102 says DEFAULT or higher, while page 321 states higher than DEFAULT!!!
+          //  (specs 1.1 removed the DEFAULT word and require it to be greater than the DEFAULT state)
 #if ((VERSION_MAJOR == 1) && (VERSION_MINOR >= 0x10))
-            if (BX_XHCI_THIS hub.slots[slot].slot_context.slot_state > SLOT_STATE_DEFAULT) {
+          if (BX_XHCI_THIS hub.slots[slot].slot_context.slot_state > SLOT_STATE_DEFAULT) {
 #else
-            if (BX_XHCI_THIS hub.slots[slot].slot_context.slot_state >= SLOT_STATE_DEFAULT) {
+          if (BX_XHCI_THIS hub.slots[slot].slot_context.slot_state >= SLOT_STATE_DEFAULT) {
 #endif
-              comp_code = TRB_SUCCESS;  // assume good completion
-              if (a_flags & (1<<0)) {
-                copy_slot_from_buffer(&slot_context, &buffer[CONTEXT_SIZE]);
-                if (!validate_slot_context(&slot_context))
-                  comp_code = PARAMETER_ERROR;
-              }
+            comp_code = TRB_SUCCESS;  // assume good completion
+            if (a_flags & (1<<0)) {
+              copy_slot_from_buffer(&slot_context, &buffer[CONTEXT_SIZE]);
+              comp_code = validate_slot_context(&slot_context, trb_command, slot);
+            }
+            if (comp_code == TRB_SUCCESS) {
               if (a_flags & (1<<1)) {
                 copy_ep_from_buffer(&ep_context, &buffer[CONTEXT_SIZE + CONTEXT_SIZE]);
-                if (!validate_ep_context(&ep_context, BX_XHCI_THIS hub.slots[slot].slot_context.speed, 1))
-                  comp_code = PARAMETER_ERROR;
-              }
-            } else
-              comp_code = CONTEXT_STATE_ERROR;
-
-            // if all were good, go ahead and update our contexts
-            if (comp_code == TRB_SUCCESS) {
-              for (i=0; i<32; i++) {
-                if (a_flags & (1<<i)) {
-                  if (i == 0) {
-                    copy_slot_from_buffer(&slot_context, &buffer[CONTEXT_SIZE]);
-                    // only the Interrupter Target and Max Exit Latency are updated by this command
-                    BX_XHCI_THIS hub.slots[slot].slot_context.int_target = slot_context.int_target;
-                    BX_XHCI_THIS hub.slots[slot].slot_context.max_exit_latency = slot_context.max_exit_latency;
-                    // update the DCBAAP slot
-                    update_slot_context(slot);
-                  } else { // is an ep
-                    // See section 4.8.2 for what fields will be updated
-                    copy_ep_from_buffer(&ep_context, &buffer[CONTEXT_SIZE + (i * CONTEXT_SIZE)]);
-                    // All types get these four updated
-                    BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.ep_type = ep_context.ep_type;
-                    //BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.tr_dequeue_pointer = ep_context.tr_dequeue_pointer;
-                    BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.dcs = 1;
-
-                    // the Control EP0 endpoint's MPS field can not be modified by system software.
-                    // it should remain the mps for the device attached.
-                    if (i == 1) {
-                      int port_num = BX_XHCI_THIS hub.slots[slot].slot_context.rh_port_num - 1;
-                      switch (BX_XHCI_THIS hub.usb_port[port_num].device->get_speed()) {
-                        case USB_SPEED_LOW:
-                          BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.max_packet_size = 8;
-                          break;
-                        case USB_SPEED_FULL:
-                        case USB_SPEED_HIGH:
-                          BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.max_packet_size = 64;
-                          break;
-                        case USB_SPEED_SUPER:
-                          BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.max_packet_size = 512;
-                          break;
-                      }
-                    } else
-                      BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.max_packet_size = ep_context.max_packet_size;
-
-                    switch (ep_context.ep_type) {
-                      case 4: // control
-                        BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.cerr = ep_context.cerr;
-                        break;
-                      case 2:  // Bulk out
-                      case 6:  // Bulk in
-                        BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.max_burst_size = ep_context.max_burst_size;
-                        BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.cerr = ep_context.cerr;
-                        BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.max_pstreams = 0; // we don't support streams yet
-                        break;
-                      default:  // ISO or interrupt
-                        BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.max_burst_size = ep_context.max_burst_size;
-                        BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.mult = ep_context.mult;
-                        BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.cerr = 3;
-                        BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.max_pstreams = 0; // we don't support streams yet
-                        break;
-                    }
-                    // update our internal enqueue pointer
-                    //BX_XHCI_THIS hub.slots[slot].ep_context[i].enqueue_pointer = ep_context.tr_dequeue_pointer;
-                    BX_XHCI_THIS hub.slots[slot].ep_context[i].rcs = ep_context.dcs;
-
-                    // update the DCBAAP slot's ep
-                    update_ep_context(slot, i);
-                  }
-                }
+                comp_code = validate_ep_context(&ep_context, trb_command, a_flags, BX_XHCI_THIS hub.slots[slot].slot_context.rh_port_num - 1, 1);
               }
             }
-          } else
-            comp_code = SLOT_NOT_ENABLED;
+          } else {
+            comp_code = CONTEXT_STATE_ERROR;
+            BX_DEBUG(("Evaluate Context with an illegal slot state"));
+          }
 
-          write_event_TRB(0, org_addr, TRB_SET_COMP_CODE(comp_code), TRB_SET_SLOT(slot) | TRB_SET_TYPE(COMMAND_COMPLETION), 1);
-          BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: Evaluate TRB (slot = %i) (a_flags = 0x%08X) (returning %i)",
-            (bx_phy_address) org_addr, slot, a_flags, comp_code));
-        }
+          // if all were good, go ahead and update our contexts
+          if (comp_code == TRB_SUCCESS) {
+            if (a_flags & (1<<0)) { // slot context
+              // See section 6.2.2.3 for what fields will be updated
+              copy_slot_from_buffer(&slot_context, &buffer[CONTEXT_SIZE]);
+              // only the Interrupter Target and Max Exit Latency are updated by this command
+              BX_XHCI_THIS hub.slots[slot].slot_context.int_target = slot_context.int_target;
+              BX_XHCI_THIS hub.slots[slot].slot_context.max_exit_latency = slot_context.max_exit_latency;
+              update_slot_context(slot); // update the DCBAAP slot
+            }
+            if (a_flags & (1<<1)) { // control ep context
+              // See section 6.2.3.3 for what fields will be updated
+              copy_ep_from_buffer(&ep_context, &buffer[CONTEXT_SIZE + CONTEXT_SIZE]);
+              BX_XHCI_THIS hub.slots[slot].ep_context[1].ep_context.max_packet_size = ep_context.max_packet_size;
+              update_ep_context(slot, 1);
+            }
+          }
+        } else
+          comp_code = SLOT_NOT_ENABLED;
+
+        write_event_TRB(0, org_addr, TRB_SET_COMP_CODE(comp_code), TRB_SET_SLOT(slot) | TRB_SET_TYPE(COMMAND_COMPLETION), 1);
+        BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: Evaluate TRB (slot = %d) (d_flags = 0x%08X) (a_flags = 0x%08X) (returning %d)",
+          (bx_phy_address) org_addr, slot, d_flags, a_flags, comp_code));
+        
         break;
 
       case CONFIG_EP: {
         slot = TRB_GET_SLOT(trb.command);  // slots are 1 based
         bool dc = TRB_DC(trb.command);
         if (BX_XHCI_THIS hub.slots[slot].enabled) {
-          get_dwords((bx_phy_address) trb.parameter, (Bit32u*)buffer, (CONTEXT_SIZE + (CONTEXT_SIZE * 32)) >> 2);
-          DEV_MEM_READ_PHYSICAL((bx_phy_address) trb.parameter,     4, (Bit8u*)&d_flags);
-          DEV_MEM_READ_PHYSICAL((bx_phy_address) trb.parameter + 4, 4, (Bit8u*)&a_flags);
+          get_dwords((bx_phy_address) trb.parameter, (Bit32u *) buffer, (CONTEXT_SIZE + (CONTEXT_SIZE * 32)) >> 2);
+          d_flags = * (Bit32u *) &buffer[0];
+          a_flags = * (Bit32u *) &buffer[4];
           copy_slot_from_buffer(&slot_context, &buffer[CONTEXT_SIZE]);  // so we get entry_count
 
-          if (BX_XHCI_THIS hub.slots[slot].slot_context.slot_state == SLOT_STATE_CONFIGURED) {
-            for (i=2; i<32; i++) {
-              if (dc || (d_flags & (1<<i))) {
-                BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.ep_state = EP_STATE_DISABLED;
-                // TODO: Bandwidth stuff
-                update_ep_context(slot, i);
-              }
-            }
-            if (dc) {
-              BX_XHCI_THIS hub.slots[slot].slot_context.entries = 1;
-              update_slot_context(slot);
+          for (i=2; i<32; i++) {
+            if (dc || (d_flags & (1<<i))) {
+              BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.ep_state = EP_STATE_DISABLED;
+              // TODO: Bandwidth stuff
+              update_ep_context(slot, i);
             }
           }
-
-          if (!dc && (BX_XHCI_THIS hub.slots[slot].slot_context.slot_state >= SLOT_STATE_ADDRESSED)) {
+          if (dc) {
+            BX_XHCI_THIS hub.slots[slot].slot_context.entries = 1;
+            BX_XHCI_THIS hub.slots[slot].slot_context.slot_state = SLOT_STATE_ADDRESSED;
+            update_slot_context(slot);
+          } else
+            
+          if (BX_XHCI_THIS hub.slots[slot].slot_context.slot_state >= SLOT_STATE_ADDRESSED) {
             comp_code = TRB_SUCCESS;  // assume good completion
+            if ((d_flags & 3) > 0)    // the D0 (slot) and D1 (ep0) bits must be cleared
+              comp_code = PARAMETER_ERROR;
+            if ((a_flags & 3) == 1) { // the A0 (slot) bit must be set, and A1 (ep0) must be cleared
+              comp_code = validate_slot_context(&slot_context, trb_command, slot);
+            } else {
+              comp_code = PARAMETER_ERROR;
+            }
+            
             // Check all the input context entries with an a_flag == 1
             for (i=2; i<32; i++) {
               if (a_flags & (1<<i)) {
                 copy_ep_from_buffer(&ep_context, &buffer[CONTEXT_SIZE + (CONTEXT_SIZE * i)]);
-                if ((i > (int) slot_context.entries) ||
-                     !validate_ep_context(&ep_context, BX_XHCI_THIS hub.slots[slot].slot_context.speed, i)) {
+                if (i > (int) slot_context.entries) {
                   comp_code = PARAMETER_ERROR;
                   break;  // no need to check the rest
                 }
+                comp_code = validate_ep_context(&ep_context, trb_command, a_flags, BX_XHCI_THIS hub.slots[slot].slot_context.rh_port_num - 1, i);
+                if (comp_code != TRB_SUCCESS)
+                  break;  // no need to check the rest
               }
             }
-
+            
             // if all were good, go ahead and update our contexts
             if (comp_code == TRB_SUCCESS) {
+              // first update the slot context
+              // See section 6.2.2.2 for what fields will be updated
+              BX_XHCI_THIS hub.slots[slot].slot_context.entries = slot_context.entries;
+              BX_XHCI_THIS hub.slots[slot].slot_context.hub = slot_context.hub;
+              BX_XHCI_THIS hub.slots[slot].slot_context.ttt = slot_context.ttt;
+              BX_XHCI_THIS hub.slots[slot].slot_context.mtt = slot_context.mtt;
+              BX_XHCI_THIS hub.slots[slot].slot_context.num_ports = slot_context.num_ports;
+              
+              // now the endpoints
               for (i=2; i<32; i++) {
                 if (d_flags & (1<<i)) {
                   BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.ep_state = EP_STATE_DISABLED;
@@ -2528,6 +2722,9 @@ void bx_usb_xhci_c::process_command_ring(void)
                   update_ep_context(slot, i);
                 }
                 if (a_flags & (1<<i)) {
+                  // xhci 1.0: section 4.6.6, page 97
+                  // All fields of the Input Endpoint Context data structure in the Configure Endpoint Context
+                  //  are copied to the Output Endpoint Context fields in the Device Context.
                   copy_ep_from_buffer(&BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context, &buffer[CONTEXT_SIZE + (i * CONTEXT_SIZE)]);
                   BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.ep_state = EP_STATE_RUNNING;
                   // initialize our internal enqueue pointer
@@ -2535,20 +2732,28 @@ void bx_usb_xhci_c::process_command_ring(void)
                     BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.tr_dequeue_pointer;
                   BX_XHCI_THIS hub.slots[slot].ep_context[i].rcs = BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.dcs;
                   BX_XHCI_THIS hub.slots[slot].ep_context[i].edtla = 0;
+                  // once the ep is configured, the Stream Context belongs to us
+                  if (BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.max_pstreams > 0) {
+                    for (j=1; j<PSA_MAX_SIZE_NUM(BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.max_pstreams) && (j < MAX_PSA_SIZE_NUM); j++) {
+                      get_stream_info(&BX_XHCI_THIS hub.slots[slot].ep_context[i].stream[j],
+                                       BX_XHCI_THIS hub.slots[slot].ep_context[i].enqueue_pointer, j);
+                    }
+                  }
                   // TODO: Bandwidth stuff
                   update_ep_context(slot, i);
                 }
               }
 
               // if all EP's are in the disabled state, then set to slot_state = ADDRESSED, else slot_state = CONFIGURED
-              BX_XHCI_THIS hub.slots[slot].slot_context.slot_state = SLOT_STATE_ADDRESSED; // assume all disabled
+              BX_XHCI_THIS hub.slots[slot].slot_context.slot_state = SLOT_STATE_ADDRESSED;
               for (i=2; i<32; i++) {
-                if (BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.ep_state > EP_STATE_DISABLED) {
+                if (BX_XHCI_THIS hub.slots[slot].ep_context[i].ep_context.ep_state == EP_STATE_RUNNING) {
                   BX_XHCI_THIS hub.slots[slot].slot_context.slot_state = SLOT_STATE_CONFIGURED;
                   break;
                 }
               }
-              BX_XHCI_THIS hub.slots[slot].slot_context.entries = slot_context.entries;  ///////
+              
+              // now update the slot
               update_slot_context(slot);
             }
           } else
@@ -2556,11 +2761,9 @@ void bx_usb_xhci_c::process_command_ring(void)
         } else
           comp_code = SLOT_NOT_ENABLED;
 
-        // TODO: Page 101 (change to context entries)
-
         write_event_TRB(0, org_addr, TRB_SET_COMP_CODE(comp_code), TRB_SET_SLOT(slot) | TRB_SET_TYPE(COMMAND_COMPLETION), 1);
-        BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: Found Config_EP TRB (slot = %i) (returning %i)",
-          (bx_phy_address) org_addr, slot, comp_code));
+        BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: Found Config_EP TRB (slot = %d) (dc = %d) (d_flags = 0x%08X) (a_flags = 0x%08X) (returning %d)",
+          (bx_phy_address) org_addr, slot, dc, d_flags, a_flags, comp_code));
       }
       break;
 
@@ -2587,10 +2790,10 @@ void bx_usb_xhci_c::process_command_ring(void)
           BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.ep_state = EP_STATE_STOPPED;
 
         write_event_TRB(0, org_addr, TRB_SET_COMP_CODE(comp_code), TRB_SET_SLOT(slot) | TRB_SET_TYPE(COMMAND_COMPLETION), 1);
-        BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: Found Set_tr_Dequeue TRB (slot = %i) (ep = %i) (returning %i)",
+        BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: Found Set_tr_Dequeue TRB (slot = %d) (ep = %d) (returning %d)",
           (bx_phy_address) org_addr, slot, ep, comp_code));
         if (comp_code == TRB_SUCCESS)
-          BX_INFO(("  New address: 0x" FORMATADDRESS " state = %i", (bx_phy_address) BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer,
+          BX_INFO(("  New address: 0x" FORMATADDRESS " state = %d", (bx_phy_address) BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer,
             BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.dcs));
         break;
 
@@ -2613,22 +2816,23 @@ void bx_usb_xhci_c::process_command_ring(void)
         }
 
         write_event_TRB(0, org_addr, TRB_SET_COMP_CODE(comp_code), TRB_SET_SLOT(slot) | TRB_SET_TYPE(COMMAND_COMPLETION), 1);
-        BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: Found Stop EP TRB (slot = %i) (ep = %i) (sp = %i) (returning 1)",
+        BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: Found Stop EP TRB (slot = %d) (ep = %d) (sp = %d) (returning 1)",
           (bx_phy_address) org_addr, slot, ep, ((trb.command & (1<<23)) == (1<<23))));
         break;
 
-      // Get Port Bandwidth (only available on version 0.96 or 0.95.)
+      // Get Port Bandwidth (manditory on versions 0.95, 0.96, and 1.00. Optional on later versions)
       case GET_PORT_BAND:
         {
           unsigned hub_id = TRB_GET_SLOT(trb.command);
           unsigned band_speed = ((trb.command & (0x0F << 16)) >> 16) - 1;
+          unsigned offset = band_speed * (((1 + BX_XHCI_THIS hub.n_ports) + 7) & ~7);
           if (hub_id == 0) { // root hub
             if (band_speed < 4) {
-              DEV_MEM_WRITE_PHYSICAL_DMA((bx_phy_address) trb.parameter, 1 + USB_XHCI_PORTS, port_band_width[band_speed]);
+              DEV_MEM_WRITE_PHYSICAL_DMA((bx_phy_address) trb.parameter, 1 + BX_XHCI_THIS hub.n_ports, &BX_XHCI_THIS hub.port_band_width[offset]);
               comp_code = TRB_SUCCESS;
             } else {
               comp_code = TRB_ERROR;
-              BX_ERROR(("Get Port Bandwidth with unknown speed of %i", band_speed + 1));
+              BX_ERROR(("Get Port Bandwidth with unknown speed of %d", band_speed + 1));
             }
           } else {
 #if SEC_DOMAIN_BAND
@@ -2641,7 +2845,7 @@ void bx_usb_xhci_c::process_command_ring(void)
           }
 
           write_event_TRB(0, org_addr, TRB_SET_COMP_CODE(comp_code), TRB_SET_SLOT(0) | TRB_SET_TYPE(COMMAND_COMPLETION), 1);
-          BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: GetPortBandwidth TRB (speed = %i) (hub_id = %i) (returning %i)",
+          BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: GetPortBandwidth TRB (speed = %d) (hub_id = %d) (returning %d)",
             (bx_phy_address) org_addr, band_speed, hub_id, comp_code));
         }
         break;
@@ -2663,7 +2867,7 @@ void bx_usb_xhci_c::process_command_ring(void)
           comp_code = CONTEXT_STATE_ERROR;
         }
         write_event_TRB(0, org_addr, TRB_SET_COMP_CODE(comp_code), TRB_SET_SLOT(slot) | TRB_SET_TYPE(COMMAND_COMPLETION), 1);
-        BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: Found Reset Device TRB (slot = %i) (returning %i)",
+        BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: Found Reset Device TRB (slot = %d) (returning %d)",
           (bx_phy_address) org_addr, slot, comp_code));
         break;
 
@@ -2671,7 +2875,7 @@ void bx_usb_xhci_c::process_command_ring(void)
       case NO_OP_CMD:
         slot = TRB_GET_SLOT(trb.command);  // slots are 1 based
         ep = TRB_GET_EP(trb.command);
-        BX_DEBUG(("0x" FORMATADDRESS ": Command Ring (slot = %i) (ep = %i): Found No Op TRB",
+        BX_DEBUG(("0x" FORMATADDRESS ": Command Ring (slot = %d) (ep = %d): Found No Op TRB",
           (bx_phy_address) org_addr, slot, ep));
         write_event_TRB(0, org_addr, TRB_SET_COMP_CODE(TRB_SUCCESS), TRB_SET_SLOT(0) | TRB_SET_TYPE(COMMAND_COMPLETION), 1);
         break;
@@ -2679,7 +2883,7 @@ void bx_usb_xhci_c::process_command_ring(void)
       // unknown TRB type
       default:
         BX_ERROR(("0x" FORMATADDRESS ": Command Ring: Unknown TRB found.", (bx_phy_address) org_addr));
-        BX_ERROR(("Unknown trb type found: %i(dec)  (0x" FMT_ADDRX64 " 0x%08X 0x%08X)", TRB_GET_TYPE(trb.command),
+        BX_ERROR(("Unknown trb type found: %d  (0x" FMT_ADDRX64 " 0x%08X 0x%08X)", TRB_GET_TYPE(trb.command),
           trb.parameter, trb.status, trb.command));
         slot = TRB_GET_SLOT(trb.command);  // slots are 1 based
         write_event_TRB(0, 0x0, TRB_SET_COMP_CODE(TRB_ERROR), TRB_SET_SLOT(slot) | TRB_SET_TYPE(COMMAND_COMPLETION), 1);
@@ -2707,12 +2911,12 @@ void bx_usb_xhci_c::init_event_ring(const unsigned interrupter)
     BX_XHCI_THIS hub.ring_members.event_rings[interrupter].entrys[0].size;
 
   // dump the event segment table
-  BX_DEBUG(("Interrupter %02i: Event Ring Table (at 0x" FMT_ADDRX64 ") has %i entries:", interrupter,
+  BX_DEBUG(("Interrupter %02i: Event Ring Table (at 0x" FMT_ADDRX64 ") has %d entries:", interrupter,
     addr, BX_XHCI_THIS hub.runtime_regs.interrupter[interrupter].erstsz.erstabsize));
   for (int i=0; i<BX_XHCI_THIS hub.runtime_regs.interrupter[interrupter].erstsz.erstabsize; i++) {
     DEV_MEM_READ_PHYSICAL((bx_phy_address) addr + (i * 16),     8, (Bit8u*)&val64);
     DEV_MEM_READ_PHYSICAL((bx_phy_address) addr + (i * 16) + 8, 4, (Bit8u*)&val32);
-    BX_DEBUG((" %02i:  address = 0x" FMT_ADDRX64 "  Count = %i", i, val64, val32 & 0x0000FFFF));
+    BX_DEBUG((" %02i:  address = 0x" FMT_ADDRX64 "  Count = %d", i, val64, val32 & 0x0000FFFF));
   }
 }
 
@@ -2721,7 +2925,15 @@ void bx_usb_xhci_c::write_event_TRB(const unsigned interrupter, const Bit64u par
 {
   // write the TRB
   write_TRB((bx_phy_address) BX_XHCI_THIS hub.ring_members.event_rings[interrupter].cur_trb, parameter, status,
-    command | (Bit32u)BX_XHCI_THIS hub.ring_members.event_rings[interrupter].rcs); // set the cycle bit
+    command | (Bit32u) BX_XHCI_THIS hub.ring_members.event_rings[interrupter].rcs); // set the cycle bit
+  
+  BX_DEBUG(("Write Event TRB: table index: %d, trb index: %d",
+    BX_XHCI_THIS hub.ring_members.event_rings[interrupter].count,
+    BX_XHCI_THIS hub.ring_members.event_rings[interrupter].entrys[BX_XHCI_THIS hub.ring_members.event_rings[interrupter].count].size - 
+      BX_XHCI_THIS hub.ring_members.event_rings[interrupter].trb_count));
+  BX_DEBUG(("Write Event TRB: address = 0x" FORMATADDRESS " 0x" FMT_ADDRX64 " 0x%08X 0x%08X  (type = %d)",
+    (bx_phy_address) BX_XHCI_THIS hub.ring_members.event_rings[interrupter].cur_trb,
+    parameter, status, command, TRB_GET_TYPE(command)));
 
   // calculate position for next event TRB
   BX_XHCI_THIS hub.ring_members.event_rings[interrupter].cur_trb += 16;
@@ -2767,7 +2979,7 @@ void bx_usb_xhci_c::update_slot_context(const int slot)
 {
   Bit32u buffer[16];
 
-  memset(buffer, 0, 64);
+  memset(buffer, 0, 16 * sizeof(Bit32u));
   copy_slot_to_buffer(buffer, slot);
   Bit64u slot_addr = (BX_XHCI_THIS hub.op_regs.HcDCBAAP.dcbaap + (slot * sizeof(Bit64u)));
   DEV_MEM_READ_PHYSICAL((bx_phy_address) slot_addr, sizeof(Bit64u), (Bit8u *) &slot_addr);
@@ -2777,34 +2989,51 @@ void bx_usb_xhci_c::update_slot_context(const int slot)
 void bx_usb_xhci_c::update_ep_context(const int slot, const int ep)
 {
   Bit32u buffer[16];
+  unsigned i;
 
-  memset(buffer, 0, 64);
+  memset(buffer, 0, 16 * sizeof(Bit32u));
   copy_ep_to_buffer(buffer, slot, ep);
   Bit64u slot_addr = (BX_XHCI_THIS hub.op_regs.HcDCBAAP.dcbaap + (slot * sizeof(Bit64u)));
   DEV_MEM_READ_PHYSICAL((bx_phy_address) slot_addr, sizeof(Bit64u), (Bit8u *) &slot_addr);
   put_dwords((bx_phy_address) (slot_addr + (ep * CONTEXT_SIZE)), buffer, CONTEXT_SIZE >> 2);
+
+#if MAX_PSA_SIZE > 0
+  // do we need to update the stream context?
+  if (BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.max_pstreams > 0) {
+    for (i=1; i<PSA_MAX_SIZE_NUM(BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.max_pstreams) && (i < MAX_PSA_SIZE_NUM); i++) {
+      if ((BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer != 0) && 
+          (BX_XHCI_THIS hub.slots[slot].ep_context[ep].stream[i].tr_dequeue_pointer != 0)) {
+        put_stream_info(&BX_XHCI_THIS hub.slots[slot].ep_context[ep].stream[i],
+                         BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer, i);
+        // if the ep is disabled (halted), we clear our pointer so we reload it next time
+        if (BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.ep_state != EP_STATE_RUNNING)
+          BX_XHCI_THIS hub.slots[slot].ep_context[ep].stream[i].tr_dequeue_pointer = 0;
+      }
+    }
+  }
+#endif
 }
 
 void bx_usb_xhci_c::dump_slot_context(const Bit32u *context, const int slot)
 {
   BX_INFO((" -=-=-=-=-=-=-=- Slot Context -=-=-=-=-=-=-=-"));
-  BX_INFO((" Context Entries: %i (%i)", (context[0] & (0x1F<<27)) >> 27, BX_XHCI_THIS hub.slots[slot].slot_context.entries));
-  BX_INFO(("             Hub: %i (%i)", (context[0] & (1   <<26)) >> 26, BX_XHCI_THIS hub.slots[slot].slot_context.hub));
-  BX_INFO(("             MTT: %i (%i)", (context[0] & (1   <<25)) >> 25, BX_XHCI_THIS hub.slots[slot].slot_context.mtt));
+  BX_INFO((" Context Entries: %d (%d)", (context[0] & (0x1F<<27)) >> 27, BX_XHCI_THIS hub.slots[slot].slot_context.entries));
+  BX_INFO(("             Hub: %d (%d)", (context[0] & (1   <<26)) >> 26, BX_XHCI_THIS hub.slots[slot].slot_context.hub));
+  BX_INFO(("             MTT: %d (%d)", (context[0] & (1   <<25)) >> 25, BX_XHCI_THIS hub.slots[slot].slot_context.mtt));
   BX_INFO(("       ReservedZ: %02X",    (context[0] & (1   <<24)) >> 24));
-  BX_INFO(("           Speed: %i (%i)", (context[0] & (0x0F<<20)) >> 20, BX_XHCI_THIS hub.slots[slot].slot_context.speed));
+  BX_INFO(("           Speed: %d (%d)", (context[0] & (0x0F<<20)) >> 20, BX_XHCI_THIS hub.slots[slot].slot_context.speed));
   BX_INFO(("    Route String: %05X (%05X)", (context[0] & 0xFFFFF)    >>  0, BX_XHCI_THIS hub.slots[slot].slot_context.route_string));
-  BX_INFO(("       Num Ports: %i (%i)", (context[1] & (0xFF<<24)) >> 24, BX_XHCI_THIS hub.slots[slot].slot_context.num_ports));
-  BX_INFO(("     RH Port Num: %i (%i)", (context[1] & (0xFF<<16)) >> 16, BX_XHCI_THIS hub.slots[slot].slot_context.rh_port_num));
-  BX_INFO(("Max Exit Latency: %i (%i)", (context[1] & 0xFFFF)     >>  0, BX_XHCI_THIS hub.slots[slot].slot_context.max_exit_latency));
-  BX_INFO(("      Int Target: %i (%i)", (context[2] & (0x3F<<22)) >> 22, BX_XHCI_THIS hub.slots[slot].slot_context.int_target));
+  BX_INFO(("       Num Ports: %d (%d)", (context[1] & (0xFF<<24)) >> 24, BX_XHCI_THIS hub.slots[slot].slot_context.num_ports));
+  BX_INFO(("     RH Port Num: %d (%d)", (context[1] & (0xFF<<16)) >> 16, BX_XHCI_THIS hub.slots[slot].slot_context.rh_port_num));
+  BX_INFO(("Max Exit Latency: %d (%d)", (context[1] & 0xFFFF)     >>  0, BX_XHCI_THIS hub.slots[slot].slot_context.max_exit_latency));
+  BX_INFO(("      Int Target: %d (%d)", (context[2] & (0x3F<<22)) >> 22, BX_XHCI_THIS hub.slots[slot].slot_context.int_target));
   BX_INFO(("       ReservedZ: %02X",    (context[2] & (0x0F<<18)) >> 18));
-  BX_INFO(("             TTT: %i (%i)", (context[2] & (0x03<<16)) >> 16, BX_XHCI_THIS hub.slots[slot].slot_context.ttt));
-  BX_INFO(("     TT Port Num: %i (%i)", (context[2] & (0xFF<< 8)) >>  8, BX_XHCI_THIS hub.slots[slot].slot_context.tt_port_num));
-  BX_INFO(("     TT Hub Slot: %i (%i)", (context[2] & 0xFF)       >>  0, BX_XHCI_THIS hub.slots[slot].slot_context.tt_hub_slot_id));
-  BX_INFO(("      Slot State: %i (%i)", (context[3] & (0x1F<<27)) >> 27, BX_XHCI_THIS hub.slots[slot].slot_context.slot_state));
+  BX_INFO(("             TTT: %d (%d)", (context[2] & (0x03<<16)) >> 16, BX_XHCI_THIS hub.slots[slot].slot_context.ttt));
+  BX_INFO(("     TT Port Num: %d (%d)", (context[2] & (0xFF<< 8)) >>  8, BX_XHCI_THIS hub.slots[slot].slot_context.tt_port_num));
+  BX_INFO(("     TT Hub Slot: %d (%d)", (context[2] & 0xFF)       >>  0, BX_XHCI_THIS hub.slots[slot].slot_context.tt_hub_slot_id));
+  BX_INFO(("      Slot State: %d (%d)", (context[3] & (0x1F<<27)) >> 27, BX_XHCI_THIS hub.slots[slot].slot_context.slot_state));
   BX_INFO(("       ReservedZ: %06X",    (context[3] & (0x7FFFF<<8)) >> 8));
-  BX_INFO(("     Dev Address: %i (%i)", (context[3] & 0xFF)       >>  0, BX_XHCI_THIS hub.slots[slot].slot_context.device_address));
+  BX_INFO(("     Dev Address: %d (%d)", (context[3] & 0xFF)       >>  0, BX_XHCI_THIS hub.slots[slot].slot_context.device_address));
   BX_INFO(("       ReservedZ: %08X",     context[4]));
   BX_INFO(("       ReservedZ: %08X",     context[5]));
   BX_INFO(("       ReservedZ: %08X",     context[6]));
@@ -2825,24 +3054,24 @@ void bx_usb_xhci_c::dump_ep_context(const Bit32u *context, const int slot, const
 {
   BX_INFO((" -=-=-=-=-=-=-=-=- EP Context -=-=-=-=-=-=-=-"));
   BX_INFO(("       ReservedZ: %02x",    (context[0] & (0xFF<<24)) >> 24));
-  BX_INFO(("        Interval: %i (%i)", (context[0] & (0x0F<<16)) >> 16, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.interval));
-  BX_INFO(("             LSA: %i (%i)", (context[0] & (1   <<15)) >> 15, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.lsa));
-  BX_INFO(("     MaxPStreams: %i (%i)", (context[0] & (0x1F<<10)) >> 10, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.max_pstreams));
-  BX_INFO(("            Mult: %i (%i)", (context[0] & (0x03<< 8)) >>  8, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.mult));
+  BX_INFO(("        Interval: %d (%d)", (context[0] & (0x0F<<16)) >> 16, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.interval));
+  BX_INFO(("             LSA: %d (%d)", (context[0] & (1   <<15)) >> 15, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.lsa));
+  BX_INFO(("     MaxPStreams: %d (%d)", (context[0] & (0x1F<<10)) >> 10, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.max_pstreams));
+  BX_INFO(("            Mult: %d (%d)", (context[0] & (0x03<< 8)) >>  8, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.mult));
   BX_INFO(("       ReservedZ: %02x",    (context[0] & (0x1F<< 3)) >>  3));
-  BX_INFO(("        EP State: %i (%i)", (context[0] & 0x7)        >>  0, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.ep_state));
-  BX_INFO((" Max Packet Size: %i (%i)", (context[1] & (0xFFFF<<16)) >> 16, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.max_packet_size));
-  BX_INFO(("  Max Burst Size: %i (%i)", (context[1] & (0xFF<< 8)) >>  8, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.max_burst_size));
-  BX_INFO(("             HID: %i (%i)", (context[1] & (1   << 7)) >>  7, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.hid));
+  BX_INFO(("        EP State: %d (%d)", (context[0] & 0x7)        >>  0, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.ep_state));
+  BX_INFO((" Max Packet Size: %d (%d)", (context[1] & (0xFFFF<<16)) >> 16, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.max_packet_size));
+  BX_INFO(("  Max Burst Size: %d (%d)", (context[1] & (0xFF<< 8)) >>  8, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.max_burst_size));
+  BX_INFO(("             HID: %d (%d)", (context[1] & (1   << 7)) >>  7, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.hid));
   BX_INFO(("       ReservedZ: %01x",    (context[1] & (1   << 6)) >>  6));
-  BX_INFO(("         EP Type: %i (%i)", (context[1] & (0x07<< 3)) >>  3, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.ep_type));
-  BX_INFO(("            CErr: %i (%i)", (context[1] & (0x03<< 1)) >>  1, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.cerr));
+  BX_INFO(("         EP Type: %d (%d)", (context[1] & (0x07<< 3)) >>  3, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.ep_type));
+  BX_INFO(("            CErr: %d (%d)", (context[1] & (0x03<< 1)) >>  1, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.cerr));
   BX_INFO(("       ReservedZ: %01x",    (context[1] & (1   << 0)) >>  0));
-  BX_INFO(("  TR Dequeue Ptr: " FMT_ADDRX64 " (" FMT_ADDRX64 ")", (*(Bit64u *) &context[2] & (Bit64u) ~0x0F), BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.tr_dequeue_pointer));
+  BX_INFO(("  TR Dequeue Ptr: " FMT_ADDRX64 " (" FMT_ADDRX64 ")", (* (Bit64u *) &context[2] & (Bit64u) ~0x0F), BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.tr_dequeue_pointer));
   BX_INFO(("       ReservedZ: %01x",    (context[2] & (0x07  << 1)) >>  1));
-  BX_INFO(("             DCS: %i (%i)", (context[2] & (1     << 0)) >>  0, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.dcs));
-  BX_INFO(("Avg ESIT Payload: %i (%i)", (context[4] & (0xFFFF<<16)) >> 16, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.max_esit_payload));
-  BX_INFO(("  Avg TRB Length: %i (%i)", (context[4] & (0xFFFF<< 0)) >>  0, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.average_trb_len));
+  BX_INFO(("             DCS: %d (%d)", (context[2] & (1     << 0)) >>  0, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.dcs));
+  BX_INFO(("Avg ESIT Payload: %d (%d)", (context[4] & (0xFFFF<<16)) >> 16, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.max_esit_payload));
+  BX_INFO(("  Avg TRB Length: %d (%d)", (context[4] & (0xFFFF<< 0)) >>  0, BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.average_trb_len));
   BX_INFO(("       ReservedZ: %08x",     context[5]));
   BX_INFO(("       ReservedZ: %08x",     context[6]));
   BX_INFO(("       ReservedZ: %08x",     context[7]));
@@ -2858,9 +3087,17 @@ void bx_usb_xhci_c::dump_ep_context(const Bit32u *context, const int slot, const
 #endif
 }
 
+void bx_usb_xhci_c::dump_stream_context(const Bit32u *context)
+{
+  BX_INFO((" -=-=-=-=-=-=-=- Stream Context -=-=-=-=-=-=-"));
+  BX_INFO(("  TR Dequeue Ptr: " FMT_ADDRX64 " (" FMT_ADDRX64 ")", (* (Bit64u *) &context[0] & (Bit64u) ~0x0F)));
+  BX_INFO(("    Content Type: %01x",    (context[0] & (0x07  << 1)) >>  1));
+  BX_INFO(("             DCS: %d (%d)", (context[0] & (1     << 0)) >>  0));
+}
+
 void bx_usb_xhci_c::copy_slot_from_buffer(struct SLOT_CONTEXT *slot_context, const Bit8u *buffer)
 {
-  Bit32u *buffer32 = (Bit32u*)buffer;
+  Bit32u *buffer32 = (Bit32u *) buffer;
 
   slot_context->entries =          (buffer32[0] >> 27);
   slot_context->hub =              (buffer32[0] & (1<<26)) ? 1 : 0;
@@ -2880,7 +3117,7 @@ void bx_usb_xhci_c::copy_slot_from_buffer(struct SLOT_CONTEXT *slot_context, con
 
 void bx_usb_xhci_c::copy_ep_from_buffer(struct EP_CONTEXT *ep_context, const Bit8u *buffer)
 {
-  Bit32u *buffer32 = (Bit32u*)buffer;
+  Bit32u *buffer32 = (Bit32u *) buffer;
 
   ep_context->interval =           (buffer32[0] & (0xFF<<16)) >> 16;
   ep_context->lsa =                (buffer32[0] & (1<<15)) ? 1 : 0;
@@ -2892,7 +3129,7 @@ void bx_usb_xhci_c::copy_ep_from_buffer(struct EP_CONTEXT *ep_context, const Bit
   ep_context->hid =                (buffer32[1] & (1<<7)) ? 1 : 0;
   ep_context->ep_type =            (buffer32[1] & (0x07<<3)) >> 3;
   ep_context->cerr =               (buffer32[1] & (0x03<<1)) >> 1;
-  ep_context->tr_dequeue_pointer = (buffer32[2] & (Bit64u) ~0xF) | ((Bit64u)buffer32[3] << 32);
+  ep_context->tr_dequeue_pointer = (buffer32[2] & (Bit64u) ~0xF) | ((Bit64u) buffer32[3] << 32);
   ep_context->dcs =                (buffer32[2] & (1<<0));
   ep_context->max_esit_payload =   (buffer32[4] >> 16);
   ep_context->average_trb_len =    (buffer32[4] & 0xFFFF);
@@ -2935,69 +3172,209 @@ void bx_usb_xhci_c::copy_ep_to_buffer(Bit32u *buffer32, const int slot, const in
                  BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.average_trb_len;
 }
 
-bool bx_usb_xhci_c::validate_slot_context(const struct SLOT_CONTEXT *slot_context)
+void bx_usb_xhci_c::copy_stream_from_buffer(struct STREAM_CONTEXT *context, const Bit8u *buffer)
 {
-  // specs:6.2.2.3:   Only checks the Interrupter Target and Max Latency fields for validity
-  //  See also 4.6.7
-  // only the Interrupter Target and Max Exit Latency are evaluated
+  Bit32u *buffer32 = (Bit32u *) buffer;
 
-  BX_DEBUG(("   slot_context->int_target = %i, slot_context->max_exit_latency = %i", slot_context->int_target, slot_context->max_exit_latency));
-
-  return 1;
+  context->tr_dequeue_pointer = (buffer32[0] & (Bit64u) ~0xF) | ((Bit64u) buffer32[1] << 32);
+  context->dcs =                (buffer32[0] & (1<<0));
+  context->sct =               ((buffer32[0] & (7<<1)) >> 1);
+#if ((VERSION_MAJOR == 1) && (VERSION_MINOR >= 0x10))
+  context->stopped_EDTLA =      (buffer32[2] & 0x00FFFFFF);
+#endif
 }
 
-// xHCI, section 6.2.3.2
+void bx_usb_xhci_c::copy_stream_to_buffer(Bit8u *buffer, const struct STREAM_CONTEXT *context)
+{
+  Bit32u *buffer32 = (Bit32u *) buffer;
+
+  buffer32[0] = (Bit32u) context->tr_dequeue_pointer | (((Bit32u) context->sct) << 1) | (Bit32u) context->dcs;
+  buffer32[1] = (Bit32u)(context->tr_dequeue_pointer >> 32);
+#if ((VERSION_MAJOR == 1) && (VERSION_MINOR >= 0x10))
+  buffer[2] = context->stopped_EDTLA;
+#endif
+}
+
+// Validate a slot context
+// specs 1.0: sect 6.2.2.2 (p321):
+// specs 1.0: sect 6.2.2.3 (p321):
+//  "A 'valid' Input Slot Context for an Evaluate Context Command requires the Interrupter Target and 
+//   Max Exit Latency fields to be initialized."
+int bx_usb_xhci_c::validate_slot_context(const struct SLOT_CONTEXT *slot_context, const int trb_command, const int slot)
+{
+  int ret = TRB_SUCCESS;
+  unsigned MaxIntrs;
+  //int speed = -1;
+  //int port_num = slot_context->rh_port_num - 1;
+  
+  //if ((port_num >= 0) && (BX_XHCI_THIS hub.usb_port[port_num].device != NULL)) {
+  //  speed = BX_XHCI_THIS hub.usb_port[port_num].device->get_speed();
+  //} else {
+  //  BX_ERROR(("Validate Slot Context: Invalid port_num (%d) sent.", port_num));
+  //  return PARAMETER_ERROR;
+  //}
+  
+  switch (trb_command) {
+    case ADDRESS_DEVICE:
+    case EVALUATE_CONTEXT:
+      // valid values for the Interrupt Target are 0 to MaxIntrs-1, inclusive.
+      MaxIntrs = (BX_XHCI_THIS hub.cap_regs.HcSParams1 & (0x7FF << 8)) >> 8;
+      if (slot_context->int_target > MaxIntrs)
+        ret = PARAMETER_ERROR;
+      
+      // all high-speed and lower devices must have a Max Exit Latency value of zero
+      // (this will fail because 'rh_port_num' hasn't been initialized yet, so 'speed' will be -1)
+      //if ((slot_context->max_exit_latency > 0) && (speed < USB_SPEED_SUPER))
+      //  ret = PARAMETER_ERROR;
+      
+      if (ret != TRB_SUCCESS) {
+        BX_ERROR(("Validate Slot Context: int_target = %d (0 -> %d), slot_context->max_exit_latency = %d", 
+          slot_context->int_target, MaxIntrs, slot_context->max_exit_latency));
+      }
+      break;
+      
+    case CONFIG_EP:
+      // The config command needs to check the Context Entries field
+      if (slot_context->entries < BX_XHCI_THIS hub.slots[slot].slot_context.entries)
+        ret = PARAMETER_ERROR;
+      
+      // if 'hub' is 1 and device is a high-speed device, then the 'tt think time', 'multi-tt',
+      //  and 'number of ports' fields must be initialized.
+      // (this will fail because 'rh_port_num' hasn't been initialized yet, so 'speed' will be -1)
+      //if (slot_context->hub) {
+      //  if ((speed == USB_SPEED_HIGH) && (slot_context->ttt == 0) || (slot_context->mtt == 0)) {
+      //    ret = PARAMETER_ERROR;
+      //  }
+      //} else {
+      //  if (slot_context->num_ports != 0) {
+      //    ret = PARAMETER_ERROR;
+      //  }
+      //}
+      
+      if (ret != TRB_SUCCESS) {
+        BX_ERROR(("Validate Slot Context: entry count = %d (%d), hub = %d", 
+          slot_context->entries, BX_XHCI_THIS hub.slots[slot].slot_context.entries,
+          slot_context->hub));
+      }
+      break;
+  }
+
+  return ret;
+}
+
+// xHCI, section 6.2.3.2, p326
 // The controller can return a valid EP Context even though the MPS is less than
 //  the specified amount.  Win7 uses this to detect the actual EP0's max packet size...
 //  For example, the descriptor might return 64, but the device really only handles
 //   8-byte control transfers.
-bool bx_usb_xhci_c::validate_ep_context(const struct EP_CONTEXT *ep_context, int speed, int ep_num)
+int bx_usb_xhci_c::validate_ep_context(const struct EP_CONTEXT *ep_context, const int trb_command, const Bit32u a_flags, int port_num, int ep_num)
 {
-  // Only the Max_packet Size is evaluated (for an evaluate ep command) ???
-
-  BX_DEBUG(("   ep_num = %i, speed = %i, ep_context->max_packet_size = %i", ep_num, speed, ep_context->max_packet_size));
-
-  // We need to make sure we don't exceed the value given in the
-  //  device descriptor mps field.
-
-  // TODO: get the mps from the device's descriptor.
-  //  for now, we just use the speed indicator passed to us...
+  int ret = TRB_SUCCESS;
   unsigned int mps = 0;
+  int speed = -1;
+
+  // get the device's speed
+  if ((port_num >= 0) && (BX_XHCI_THIS hub.usb_port[port_num].device != NULL)) {
+    speed = BX_XHCI_THIS hub.usb_port[port_num].device->get_speed();
+  } else {
+    BX_ERROR(("Validate EP Context: Invalid port_num (%d) sent.", port_num));
+    return PARAMETER_ERROR;
+  }
+
+  // get the default max packet size for the device
   switch (speed) {
-    case SPEED_LOW:
+    case USB_SPEED_LOW:
       mps = 8;
       break;
-    case SPEED_FULL:
-    case SPEED_HI:
+    case USB_SPEED_FULL:
+    case USB_SPEED_HIGH:
       mps = 64;
       break;
-    case SPEED_SUPER:
+    case USB_SPEED_SUPER:
       mps = 512;
+      break;
   }
 
-  // if speed == -1, don't check the speed
-  if ((ep_num == 1) && (speed != -1)) {
-    // if not a mutliple of 8, return invalid
-    if ((ep_context->max_packet_size & 7) > 0)
-      return 0;
-    // if not at least 8, return invalid
-    if (ep_context->max_packet_size < 8)
-      return 0;
-    switch (speed) {
-      case SPEED_LOW:
-        // low-speed EP0 can only be a size of 8 bytes
-        return (ep_context->max_packet_size == 8);
-      case SPEED_FULL:
-      case SPEED_HI:
-      case SPEED_SUPER:
-        // full- and high-speed EP0 can be 8, 16, 32, 40, 48, 56, or 64
-        // super-speed EP0 can be 8, 16, 32, 40, 48, 56, 64, ..., 512
-        return ((ep_context->max_packet_size >= 8) &&
-                (ep_context->max_packet_size <= mps));
-    }
+  switch (trb_command) {
+    case ADDRESS_DEVICE:
+      if (ep_num == 1) {
+        // 1) the EP Type field = Control,
+        if (ep_context->ep_type != 4)
+          ret = PARAMETER_ERROR;
+        
+        // 2) the values of the Max Packet Size, Max Burst Size, and the Interval are considered
+        //    within range for endpoint type and the speed of the device,
+        if (ep_context->max_packet_size != mps)
+          ret = PARAMETER_ERROR;
+        if (ep_context->interval > 15) // The legal range of 0 to 15 for all (non full/low-speed interrupt) endpoint types
+          ret = PARAMETER_ERROR;
+        
+        // 3) the TR Dequeue Pointer field points to a valid Transfer Ring,
+        if (ep_context->tr_dequeue_pointer == 0)
+          ret = PARAMETER_ERROR;
+        
+        // 4) the DCS field = 1,
+        if (ep_context->dcs != 1)
+          ret = PARAMETER_ERROR;
+        
+        // 5) the MaxPStreams field = 0, and
+        if (ep_context->max_pstreams != 0)
+          ret = PARAMETER_ERROR;
+        
+        // 6) all other fields are within the valid range of values.
+        
+        // The Max Burst Size, and EP State values shall be cleared to 0.
+        if ((ep_context->max_burst_size != 0) || (ep_context->ep_state != 0))
+          ret = PARAMETER_ERROR;
+      }
+      break;
+
+    // section 6.2.3.3, p326, for an Evaluate Context Command, only the Slot and EP0 are evaluated.
+    case EVALUATE_CONTEXT:
+      if ((ep_num == 1) && (a_flags & 2)) {
+        
+        // check the max packet size field
+        if (ep_context->max_packet_size != BX_XHCI_THIS hub.usb_port[port_num].device->get_mps(ep_num / 2))
+          ret = PARAMETER_ERROR;
+        
+      }
+      break;
+      
+    case CONFIG_EP:
+      if ((ep_num > 1) && (a_flags & (1 << ep_num))) {
+        // 1) the values of the Max Packet Size, Max Burst Size, and the Interval are considered within
+        //    range for endpoint type and the speed of the device,
+        if (ep_context->max_packet_size != BX_XHCI_THIS hub.usb_port[port_num].device->get_mps(ep_num / 2))
+          ret = PARAMETER_ERROR;
+        if (ep_context->max_burst_size != BX_XHCI_THIS hub.usb_port[port_num].device->get_max_burst_size(ep_num / 2))
+          ret = PARAMETER_ERROR;
+        if (ep_context->interval > 15) // The legal range of 0 to 15 for all (non full/low-speed interrupt) endpoint types
+          ret = PARAMETER_ERROR;
+        
+        // 2) if MaxPStreams > 0, then the TR Dequeue Pointer field points to an array of valid 
+        //    Stream Contexts, or if MaxPStreams = 0, then the TR Dequeue Pointer field points 
+        //    to a Transfer Ring, 
+        if (ep_context->tr_dequeue_pointer == 0)
+          ret = PARAMETER_ERROR;
+        
+        // 3) the EP State field = Disabled, and
+        if (ep_context->ep_state != 0)
+          ret = PARAMETER_ERROR;
+        
+        // 4) all other fields are within their valid range of values.
+        
+      }
+      break;
+      
+    default:
+      BX_ERROR(("Error: Unknown command on Evaluate Context: %d", trb_command));
   }
 
-  return 1;
+  if (ret != TRB_SUCCESS) {
+    BX_ERROR(("Validate Endpoint Context returned PARAMETER_ERROR."));
+  }
+
+  return ret;
 }
 
 // The Specs say that the address is only unique to the RH Port Number
@@ -3007,7 +3384,7 @@ int bx_usb_xhci_c::create_unique_address(const int slot)
   return (slot + 1);  // Windows may need the first one to be 2 (though it shouldn't know the difference for xHCI)
 }
 
-int bx_usb_xhci_c::send_set_address(const int addr, const int port_num)
+int bx_usb_xhci_c::send_set_address(const int addr, const int port_num, const int slot)
 {
   int ret;
   USBPacket packet;
@@ -3018,6 +3395,10 @@ int bx_usb_xhci_c::send_set_address(const int addr, const int port_num)
 
   packet.pid = USB_TOKEN_SETUP;
   packet.devep = 0;
+  packet.speed = broadcast_speed(slot);
+#if HANDLE_TOGGLE_CONTROL
+  packet.toggle = -1; // the xHCI handles the data toggle bit for USB2 devices
+#endif
   packet.devaddr = 0;  // default address
   packet.len = 8;
   packet.data = setup_address;
@@ -3029,6 +3410,31 @@ int bx_usb_xhci_c::send_set_address(const int addr, const int port_num)
     packet.len = 0;
     ret = BX_XHCI_THIS broadcast_packet(&packet, port_num);
   }
+  return ret;
+}
+
+int bx_usb_xhci_c::broadcast_speed(const int slot)
+{
+  int ret = -1;
+  
+  switch (BX_XHCI_THIS hub.slots[slot].slot_context.speed) {
+    case 1:
+      ret = USB_SPEED_FULL;
+      break;
+    case 2:
+      ret = USB_SPEED_LOW;
+      break;
+    case 3:
+      ret = USB_SPEED_HIGH;
+      break;
+    case 4: case 5:
+    case 6: case 7:
+      ret = USB_SPEED_SUPER;
+      break;
+    default:
+      BX_ERROR(("Invalid speed (%d) specified in Speed field of the Slot Context.", BX_XHCI_THIS hub.slots[slot].slot_context.speed));
+  }
+  
   return ret;
 }
 
@@ -3048,19 +3454,63 @@ void bx_usb_xhci_c::xhci_timer_handler(void *this_ptr)
   class_ptr->xhci_timer();
 }
 
+// return the status of all the PSCEG (Port Status Change Event Generation) bits
+Bit8u bx_usb_xhci_c::get_psceg(const int port)
+{
+  Bit8u ret;
+
+  ret  = (BX_XHCI_THIS hub.usb_port[port].portsc.csc) ? PSCEG_CSC : 0;
+  ret |= (BX_XHCI_THIS hub.usb_port[port].portsc.pec) ? PSCEG_PEC : 0;
+  ret |= (BX_XHCI_THIS hub.usb_port[port].portsc.wrc) ? PSCEG_WRC : 0;
+  ret |= (BX_XHCI_THIS hub.usb_port[port].portsc.occ) ? PSCEG_OCC : 0;
+  ret |= (BX_XHCI_THIS hub.usb_port[port].portsc.prc) ? PSCEG_PRC : 0;
+  ret |= (BX_XHCI_THIS hub.usb_port[port].portsc.plc) ? PSCEG_PLC : 0;
+  ret |= (BX_XHCI_THIS hub.usb_port[port].portsc.cec) ? PSCEG_CEC : 0;
+
+  return ret;
+}
+
 void bx_usb_xhci_c::xhci_timer(void)
 {
   int slot, ep;
+  unsigned int port;
+  Bit8u new_psceg;
 
   if (BX_XHCI_THIS hub.op_regs.HcStatus.hch)
     return;
 
+  /* Per section 4.19.3 of the xHCI 1.0 specs, we need to present
+    *  a "Port Status Change Event".  
+    * Also, we should only present this event once if any other bits 
+    *  change, only presenting it again when all change bits are written 
+    *  back to zero, and a change bit goes from 0 to 1.
+    */
+  for (port=0; port<BX_XHCI_THIS hub.n_ports; port++) {
+    new_psceg = get_psceg(port);
+    BX_XHCI_THIS hub.usb_port[port].psceg &= new_psceg;
+    if ((BX_XHCI_THIS hub.usb_port[port].psceg == 0) && (new_psceg != 0)) {
+      BX_DEBUG(("Port #%d Status Change Event: (%2Xh)", port + 1, new_psceg));
+      write_event_TRB(0, ((port + 1) << 24), TRB_SET_COMP_CODE(1), TRB_SET_TYPE(PORT_STATUS_CHANGE), 1);
+    }
+    BX_XHCI_THIS hub.usb_port[port].psceg |= new_psceg;
+  }
+  
   for (slot=1; slot<MAX_SLOTS; slot++) {
     if (BX_XHCI_THIS hub.slots[slot].enabled) {
       for (ep=1; ep<32; ep++) {
         if (BX_XHCI_THIS hub.slots[slot].ep_context[ep].retry) {
           if (--BX_XHCI_THIS hub.slots[slot].ep_context[ep].retry_counter <= 0) {
-            BX_XHCI_THIS process_transfer_ring(slot, ep);
+            if (BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.max_pstreams > 0) {   // specifying streams
+              //
+              // ben: TODO:
+              //
+              BX_ERROR(("Retry on a streamed endpoint."));
+              
+            } else {
+              BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer =
+                BX_XHCI_THIS process_transfer_ring(slot, ep, BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer,
+                                                            &BX_XHCI_THIS hub.slots[slot].ep_context[ep].rcs, 0);
+            }
           }
         }
       }
@@ -3076,15 +3526,15 @@ void bx_usb_xhci_c::runtime_config_handler(void *this_ptr)
 
 void bx_usb_xhci_c::runtime_config(void)
 {
-  int i;
+  unsigned int i;
   char pname[6];
 
-  for (i = 0; i < BX_N_USB_XHCI_PORTS; i++) {
+  for (i = 0; i < BX_XHCI_THIS hub.n_ports; i++) {
     // device change support
     if ((BX_XHCI_THIS device_change & (1 << i)) != 0) {
       if (!BX_XHCI_THIS hub.usb_port[i].portsc.ccs) {
         sprintf(pname, "port%d", i + 1);
-        init_device(i, (bx_list_c*)SIM->get_param(pname, SIM->get_param(BXPN_USB_XHCI)));
+        init_device(i, (bx_list_c *) SIM->get_param(pname, SIM->get_param(BXPN_USB_XHCI)));
       } else {
         usb_set_connect_status(i, 0);
       }
@@ -3107,7 +3557,7 @@ void bx_usb_xhci_c::pci_write_handler(Bit8u address, Bit32u value, unsigned io_l
   for (unsigned i=0; i<io_len; i++) {
     Bit8u value8 = (value >> (i*8)) & 0xFF;
 //  Bit8u oldval = BX_XHCI_THIS pci_conf[address+i];
-    switch (address+i) {
+    switch (address + i) {
       case 0x04:
         value8 &= 0x06; // (bit 0 is read only for this card) (we don't allow port IO)
         BX_XHCI_THIS pci_conf[address+i] = value8;
@@ -3139,13 +3589,25 @@ bool bx_usb_xhci_c::usb_set_connect_status(Bit8u port, bool connected)
 {
   const bool ccs_org = BX_XHCI_THIS hub.usb_port[port].portsc.ccs;
   const bool ped_org = BX_XHCI_THIS hub.usb_port[port].portsc.ped;
+  int otherportnum = BX_XHCI_THIS hub.paired_portnum[port];
 
   usb_device_c *device = BX_XHCI_THIS hub.usb_port[port].device;
   if (device != NULL) {
     if (connected) {
+      // make sure the user has not tried to put a device on a paired port number
+      // (this is invalid in all but external USB3 hubs)
+      if (BX_XHCI_THIS hub.usb_port[otherportnum].portsc.ccs) {
+        BX_PANIC(("Port #%d: Paired port number #%d already in use.", port + 1, otherportnum + 1));
+        return 0;
+      }
       if ((device->get_speed() == USB_SPEED_SUPER) &&
           !BX_XHCI_THIS hub.usb_port[port].is_usb3) {
         BX_PANIC(("Super-speed device not supported on USB2 port."));
+        return 0;
+      }
+      if ((device->get_speed() < USB_SPEED_SUPER) &&
+          BX_XHCI_THIS hub.usb_port[port].is_usb3) {
+        BX_PANIC(("Non super-speed device not supported on USB3 port."));
         return 0;
       }
       if (BX_XHCI_THIS hub.usb_port[port].is_usb3) {
@@ -3188,16 +3650,11 @@ bool bx_usb_xhci_c::usb_set_connect_status(Bit8u port, bool connected)
         BX_XHCI_THIS hub.usb_port[port].portsc.speed = 0;
         remove_device(port);
     }
+    // did we change?
     if (ccs_org != BX_XHCI_THIS hub.usb_port[port].portsc.ccs)
       BX_XHCI_THIS hub.usb_port[port].portsc.csc = 1;
     if (ped_org != BX_XHCI_THIS hub.usb_port[port].portsc.ped)
       BX_XHCI_THIS hub.usb_port[port].portsc.pec = 1;
-
-    // we changed the value of the port, so show it
-    if (!BX_XHCI_THIS hub.op_regs.HcStatus.hch) {
-      BX_INFO(("Port #%d Status Change Event.", port + 1));
-      write_event_TRB(0, ((port + 1) << 24), TRB_SET_COMP_CODE(1), TRB_SET_TYPE(PORT_STATUS_CHANGE), 1);
-    }
   }
   return connected;
 }
@@ -3210,7 +3667,7 @@ Bit64s bx_usb_xhci_c::usb_param_handler(bx_param_c *param, bool set, Bit64s val)
   if (set) {
     portnum = atoi((param->get_parent())->get_name()+4) - 1;
     bool empty = (val == 0);
-    if ((portnum >= 0) && (portnum < USB_XHCI_PORTS)) {
+    if ((portnum >= 0) && (portnum < (int) BX_XHCI_THIS hub.n_ports)) {
       if (empty && BX_XHCI_THIS hub.usb_port[portnum].portsc.ccs) {
         BX_XHCI_THIS device_change |= (1 << portnum);
       } else if (!empty && !BX_XHCI_THIS hub.usb_port[portnum].portsc.ccs) {
@@ -3233,15 +3690,16 @@ bool bx_usb_xhci_c::usb_param_enable_handler(bx_param_c *param, bool en)
   if (en && (BX_XHCI_THIS hub.usb_port[portnum].device != NULL)) {
     en = 0;
   }
+  
   return en;
 }
 
-void bx_usb_xhci_c::dump_xhci_core(const int slots, const int eps)
+void bx_usb_xhci_c::dump_xhci_core(const unsigned int slots, const unsigned int eps)
 {
   bx_phy_address addr = BX_XHCI_THIS pci_bar[0].addr;
   Bit32u dword;
   Bit64u qword, slot_addr;
-  int p, i;
+  unsigned int p, i;
   Bit8u buffer[4096];
 
   // dump the caps registers
@@ -3278,9 +3736,9 @@ void bx_usb_xhci_c::dump_xhci_core(const int slots, const int eps)
   BX_XHCI_THIS read_handler(addr + 0x58, 4, &dword, NULL);
   BX_INFO(("      CONFIG: 0x%08X", dword));
 
-  for (i=0, p=0; i<USB_XHCI_PORTS; i++, p+=16) {
+  for (i=0, p=0; i<BX_XHCI_THIS hub.n_ports; i++, p+=16) {
     BX_XHCI_THIS read_handler(addr + 0x420 + (p + 0), 4, &dword, NULL);
-    BX_INFO(("    Port %i: 0x%08X", i, dword));
+    BX_INFO(("    Port %d: 0x%08X", i, dword));
     BX_XHCI_THIS read_handler(addr + 0x420 + (p + 4), 4, &dword, NULL);
     BX_INFO(("            0x%08X", dword));
     BX_XHCI_THIS read_handler(addr + 0x420 + (p + 8), 4, &dword, NULL);

@@ -6,7 +6,7 @@
 //
 //  Copyright (c) 2006 CodeSourcery.
 //  Written by Paul Brook
-//  Copyright (C) 2009-2021  The Bochs Project
+//  Copyright (C) 2009-2023  The Bochs Project
 //
 //  This library is free software; you can redistribute it and/or
 //  modify it under the terms of the GNU Lesser General Public
@@ -93,6 +93,10 @@ struct usb_msd_csw {
 #define MassStorageReset  0xff
 #define GetMaxLun         0xfe
 
+// If you change any of the Max Packet Size, or other fields within these
+//  descriptors, you must also change the d.endpoint_info[] array
+//  to match your changes.
+
 // Full-speed
 static const Bit8u bx_msd_dev_descriptor[] = {
   0x12,       /*  u8 bLength; */
@@ -102,7 +106,7 @@ static const Bit8u bx_msd_dev_descriptor[] = {
   0x00,       /*  u8  bDeviceClass; */
   0x00,       /*  u8  bDeviceSubClass; */
   0x00,       /*  u8  bDeviceProtocol; [ low/full speeds only ] */
-  0x08,       /*  u8  bMaxPacketSize0; 8 Bytes */
+  0x40,       /*  u8  bMaxPacketSize; 64 Bytes */
 
   /* Vendor and product id are arbitrary.  */
   0x00, 0x00, /*  u16 idVendor; */
@@ -136,7 +140,7 @@ static const Bit8u bx_msd_config_descriptor[] = {
   0x09,       /*  u8  if_bLength; */
   0x04,       /*  u8  if_bDescriptorType; Interface */
   0x00,       /*  u8  if_bInterfaceNumber; */
-  0x00,       /*  u8  if_bAlternateSetting; */
+  MSD_PROTO_BBB, /* u8  if_bAlternateSetting; */
   0x02,       /*  u8  if_bNumEndpoints; */
   0x08,       /*  u8  if_bInterfaceClass; MASS STORAGE */
   0x06,       /*  u8  if_bInterfaceSubClass; SCSI */
@@ -146,7 +150,7 @@ static const Bit8u bx_msd_config_descriptor[] = {
   /* Bulk-In endpoint */
   0x07,       /*  u8  ep_bLength; */
   0x05,       /*  u8  ep_bDescriptorType; Endpoint */
-  0x81,       /*  u8  ep_bEndpointAddress; IN Endpoint 1 */
+  0x80 | MSD_BBB_DATAIN_EP, /*  u8  ep_bEndpointAddress; IN Endpoint */
   0x02,       /*  u8  ep_bmAttributes; Bulk */
   0x40, 0x00, /*  u16 ep_wMaxPacketSize; 64 */
   0x00,       /*  u8  ep_bInterval; */
@@ -154,7 +158,7 @@ static const Bit8u bx_msd_config_descriptor[] = {
   /* Bulk-Out endpoint */
   0x07,       /*  u8  ep_bLength; */
   0x05,       /*  u8  ep_bDescriptorType; Endpoint */
-  0x02,       /*  u8  ep_bEndpointAddress; OUT Endpoint 2 */
+  0x00 | MSD_BBB_DATAOUT_EP, /*  u8  ep_bEndpointAddress; OUT Endpoint */
   0x02,       /*  u8  ep_bmAttributes; Bulk */
   0x40, 0x00, /*  u16 ep_wMaxPacketSize; 64 */
   0x00        /*  u8  ep_bInterval; */
@@ -169,13 +173,13 @@ static const Bit8u bx_msd_dev_descriptor2[] = {
   0x00,       /*  u8  bDeviceClass; */
   0x00,       /*  u8  bDeviceSubClass; */
   0x00,       /*  u8  bDeviceProtocol; [ low/full speeds only ] */
-  0x40,       /*  u8  bMaxPacketSize0; 64 Bytes */
+  0x40,       /*  u8  bMaxPacketSize; 64 Bytes */
 
   /* Vendor and product id are arbitrary.  */
   0x00, 0x00, /*  u16 idVendor; */
   0x00, 0x00, /*  u16 idProduct; */
   0x00, 0x01, /*  u16 bcdDevice */
-
+  
   0x01,       /*  u8  iManufacturer; */
   0x02,       /*  u8  iProduct; */
   0x03,       /*  u8  iSerialNumber; */
@@ -183,7 +187,7 @@ static const Bit8u bx_msd_dev_descriptor2[] = {
 };
 
 // High-speed
-static const Bit8u bx_msd_config_descriptor2[] = {
+static Bit8u bx_msd_config_descriptor2[] = {
 
   /* one configuration */
   0x09,       /*  u8  bLength; */
@@ -192,18 +196,18 @@ static const Bit8u bx_msd_config_descriptor2[] = {
   0x01,       /*  u8  bNumInterfaces; (1) */
   0x01,       /*  u8  bConfigurationValue; */
   0x00,       /*  u8  iConfiguration; */
-  0xc0,       /*  u8  bmAttributes;
+  0x80,       /*  u8  bmAttributes;
                         Bit 7: must be set,
                             6: Self-powered,
                             5: Remote wakeup,
                             4..0: resvd */
   0x00,       /*  u8  MaxPower; */
-
+  
   /* one interface */
   0x09,       /*  u8  if_bLength; */
   0x04,       /*  u8  if_bDescriptorType; Interface */
   0x00,       /*  u8  if_bInterfaceNumber; */
-  0x00,       /*  u8  if_bAlternateSetting; */
+  MSD_PROTO_BBB, /* u8  if_bAlternateSetting; */
   0x02,       /*  u8  if_bNumEndpoints; */
   0x08,       /*  u8  if_bInterfaceClass; MASS STORAGE */
   0x06,       /*  u8  if_bInterfaceSubClass; SCSI */
@@ -213,7 +217,7 @@ static const Bit8u bx_msd_config_descriptor2[] = {
   /* Bulk-In endpoint */
   0x07,       /*  u8  ep_bLength; */
   0x05,       /*  u8  ep_bDescriptorType; Endpoint */
-  0x81,       /*  u8  ep_bEndpointAddress; IN Endpoint 1 */
+  0x80 | MSD_BBB_DATAIN_EP, /*  u8  ep_bEndpointAddress; IN Endpoint */
   0x02,       /*  u8  ep_bmAttributes; Bulk */
   0x00, 0x02, /*  u16 ep_wMaxPacketSize; 512 */
   0x00,       /*  u8  ep_bInterval; */
@@ -221,10 +225,83 @@ static const Bit8u bx_msd_config_descriptor2[] = {
   /* Bulk-Out endpoint */
   0x07,       /*  u8  ep_bLength; */
   0x05,       /*  u8  ep_bDescriptorType; Endpoint */
-  0x02,       /*  u8  ep_bEndpointAddress; OUT Endpoint 2 */
+  0x00 | MSD_BBB_DATAOUT_EP, /*  u8  ep_bEndpointAddress; OUT Endpoint */
   0x02,       /*  u8  ep_bmAttributes; Bulk */
   0x00, 0x02, /*  u16 ep_wMaxPacketSize; 512 */
-  0x00        /*  u8  ep_bInterval; */
+  0x00,       /*  u8  ep_bInterval; */
+  
+  /***** If UASP is requested, the rest of this descriptor
+   * will be returned, else, the descriptor stops here *****/
+  /* alt interface 1 */
+  0x09,       /*  u8  if_bLength; */
+  0x04,       /*  u8  if_bDescriptorType; Interface */
+  0x00,       /*  u8  if_bInterfaceNumber; */
+  MSD_PROTO_UASP, /* u8  if_bAlternateSetting; */
+  0x04,       /*  u8  if_bNumEndpoints; */
+  0x08,       /*  u8  if_bInterfaceClass; MASS STORAGE */
+  0x06,       /*  u8  if_bInterfaceSubClass; SCSI */
+  0x62,       /*  u8  if_bInterfaceProtocol; UASP */
+  0x00,       /*  u8  if_iInterface; */
+  
+  /***** Command Out Pipe *****/
+  /* Alt Int 1: Bulk-Out endpoint */
+  0x07,       /*  u8  ep_bLength; */
+  0x05,       /*  u8  ep_bDescriptorType; Endpoint */
+  0x00 | MSD_UASP_COMMAND, /* u8  ep_bEndpointAddress; Out Endpoint */
+  0x02,       /*  u8  ep_bmAttributes; Bulk */
+  0x00, 0x02, /*  u16 ep_wMaxPacketSize; 512 */
+  0x00,       /*  u8  ep_bInterval; */
+  
+  /* Alt Int 1: Bulk-In Pipe usage */
+  0x04,       /*  u8  bLength; */
+  0x24,       /*  u8  bDescriptorType; Function */
+  MSD_UASP_COMMAND, /* u8  bPipeUsage; Command Out pipe */
+  0x00,       /*  u8  breserved; */
+  
+  /***** Status In Pipe *****/
+  /* Alt Int 1: Bulk-In endpoint */
+  0x07,       /*  u8  ep_bLength; */
+  0x05,       /*  u8  ep_bDescriptorType; Endpoint */
+  0x80 | MSD_UASP_STATUS, /* u8  ep_bEndpointAddress; IN Endpoint */
+  0x02,       /*  u8  ep_bmAttributes; Bulk */
+  0x00, 0x02, /*  u16 ep_wMaxPacketSize; 512 */
+  0x00,       /*  u8  ep_bInterval; */
+
+  /* Alt Int 1: Bulk-In Pipe usage */
+  0x04,       /*  u8  bLength; */
+  0x24,       /*  u8  bDescriptorType; Function */
+  MSD_UASP_STATUS, /*  u8  bPipeUsage; Status In pipe */
+  0x00,       /*  u8  breserved; */
+  
+  /***** Data In Pipe *****/
+  /* Alt Int 1: Bulk-In endpoint */
+  0x07,       /*  u8  ep_bLength; */
+  0x05,       /*  u8  ep_bDescriptorType; Endpoint */
+  0x80 | MSD_UASP_DATAIN, /* u8  ep_bEndpointAddress; IN Endpoint */
+  0x02,       /*  u8  ep_bmAttributes; Bulk */
+  0x00, 0x02, /*  u16 ep_wMaxPacketSize; 512 */
+  0x00,       /*  u8  ep_bInterval; */
+
+  /* Alt Int 1: Bulk-In Pipe usage */
+  0x04,       /*  u8  bLength; */
+  0x24,       /*  u8  bDescriptorType; Function */
+  MSD_UASP_DATAIN, /*  u8  bPipeUsage; Data In pipe */
+  0x00,       /*  u8  breserved; */
+  
+  /***** Data Out Pipe *****/
+  /* Alt Int 1: Bulk-Out endpoint */
+  0x07,       /*  u8  ep_bLength; */
+  0x05,       /*  u8  ep_bDescriptorType; Endpoint */
+  0x00 | MSD_UASP_DATAOUT, /*  u8  ep_bEndpointAddress; OUT Endpoint */
+  0x02,       /*  u8  ep_bmAttributes; Bulk */
+  0x00, 0x02, /*  u16 ep_wMaxPacketSize; 512 */
+  0x00,       /*  u8  ep_bInterval; */
+  
+  /* Alt Int 1: Bulk-Out Pipe usage */
+  0x04,       /*  u8  bLength; */
+  0x24,       /*  u8  bDescriptorType; Function */
+  MSD_UASP_DATAOUT, /* u8  bPipeUsage; Data Out pipe */
+  0x00,       /*  u8  breserved; */
 };
 
 // Super-speed
@@ -236,7 +313,7 @@ static const Bit8u bx_msd_dev_descriptor3[] = {
   0x00,       /*  u8  bDeviceClass; */
   0x00,       /*  u8  bDeviceSubClass; */
   0x00,       /*  u8  bDeviceProtocol; */
-  0x09,       /*  u8  bMaxPacketSize0; 2^^9 = 512 Bytes */
+  0x09,       /*  u8  bMaxPacketSize; 2^^9 = 512 Bytes */
 
   /* Vendor and product id are arbitrary.  */
   0x00, 0x00, /*  u16 idVendor; */
@@ -249,11 +326,14 @@ static const Bit8u bx_msd_dev_descriptor3[] = {
   0x01        /*  u8  bNumConfigurations; */
 };
 
-static const Bit8u bx_msd_config_descriptor3[] = {
+static Bit8u bx_msd_config_descriptor3[] = {
   /* one configuration */
   0x09,       /*  u8  bLength; */
   0x02,       /*  u8  bDescriptorType; Configuration */
-  0x2C, 0x00, /*  u16 wTotalLength; */
+  
+  /* this length will be modified depending if UASP is requested (0x002C or 0x0079) */
+  0x2C, 0x00, /*  u16 wTotalLength; */ 
+
   0x01,       /*  u8  bNumInterfaces; (1) */
   0x01,       /*  u8  bConfigurationValue; */
   0x00,       /*  u8  iConfiguration; */
@@ -262,48 +342,149 @@ static const Bit8u bx_msd_config_descriptor3[] = {
                             6: Self-powered,
                             5: Remote wakeup,
                             4..0: resvd */
-  0x3F,       /*  u8  MaxPower; */
+  0x12,       /*  u8  MaxPower; */
 
-  /* one interface */
+  /* alt interface 0 */
   0x09,       /*  u8  if_bLength; */
   0x04,       /*  u8  if_bDescriptorType; Interface */
   0x00,       /*  u8  if_bInterfaceNumber; */
-  0x00,       /*  u8  if_bAlternateSetting; */
+  MSD_PROTO_BBB, /* u8  if_bAlternateSetting; */
   0x02,       /*  u8  if_bNumEndpoints; */
   0x08,       /*  u8  if_bInterfaceClass; MASS STORAGE */
   0x06,       /*  u8  if_bInterfaceSubClass; SCSI */
   0x50,       /*  u8  if_bInterfaceProtocol; Bulk Only */
   0x00,       /*  u8  if_iInterface; */
 
-  /* Bulk-In endpoint */
+  /* Alt Int 0: Bulk-In endpoint */
   0x07,       /*  u8  ep_bLength; */
   0x05,       /*  u8  ep_bDescriptorType; Endpoint */
-  0x81,       /*  u8  ep_bEndpointAddress; IN Endpoint 1 */
+  0x80 | MSD_BBB_DATAIN_EP, /*  u8  ep_bEndpointAddress; IN Endpoint */
   0x02,       /*  u8  ep_bmAttributes; Bulk */
   0x00, 0x04, /*  u16 ep_wMaxPacketSize; 1024 */
   0x00,       /*  u8  ep_bInterval; */
 
-  /* Bulk-In companion descriptor */
+  /* Alt Int 0: Bulk-In companion descriptor */
   0x06,       /*  u8  epc_bLength; */
   0x30,       /*  u8  epc_bDescriptorType; Endpoint Companion */
   0x0F,       /*  u8  epc_bMaxPerBurst; */
   0x00,       /*  u8  epc_bmAttributes; */
   0x00, 0x00, /*  u16 epc_reserved; */
 
-  /* Bulk-Out endpoint */
+  /* Alt Int 0: Bulk-Out endpoint */
   0x07,       /*  u8  ep_bLength; */
   0x05,       /*  u8  ep_bDescriptorType; Endpoint */
-  0x02,       /*  u8  ep_bEndpointAddress; OUT Endpoint 2 */
+  0x00 | MSD_BBB_DATAOUT_EP, /*  u8  ep_bEndpointAddress; OUT Endpoint */
   0x02,       /*  u8  ep_bmAttributes; Bulk */
   0x00, 0x04, /*  u16 ep_wMaxPacketSize; 1024 */
   0x00,       /*  u8  ep_bInterval; */
 
-  /* Bulk-Out companion descriptor */
+  /* Alt Int 0: Bulk-Out companion descriptor */
   0x06,       /*  u8  epc_bLength; */
   0x30,       /*  u8  epc_bDescriptorType; Endpoint Companion */
   0x0F,       /*  u8  epc_bMaxPerBurst; */
   0x00,       /*  u8  epc_bmAttributes; */
-  0x00, 0x00 /*  u16  epc_reserved; */
+  0x00, 0x00, /*  u16  epc_reserved; */
+
+  /***** If UASP is requested, the rest of this descriptor
+  * will be returned, else, the descriptor stops here *****/
+  /* alt interface 1 */
+  0x09,       /*  u8  if_bLength; */
+  0x04,       /*  u8  if_bDescriptorType; Interface */
+  0x00,       /*  u8  if_bInterfaceNumber; */
+  MSD_PROTO_UASP, /* u8  if_bAlternateSetting; */
+  0x04,       /*  u8  if_bNumEndpoints; */
+  0x08,       /*  u8  if_bInterfaceClass; MASS STORAGE */
+  0x06,       /*  u8  if_bInterfaceSubClass; SCSI */
+  0x62,       /*  u8  if_bInterfaceProtocol; UASP */
+  0x00,       /*  u8  if_iInterface; */
+  
+  /***** Command Out Pipe *****/
+  /* Alt Int 1: Bulk-Out endpoint */
+  0x07,       /*  u8  ep_bLength; */
+  0x05,       /*  u8  ep_bDescriptorType; Endpoint */
+  0x00 | MSD_UASP_COMMAND, /* u8  ep_bEndpointAddress; Out Endpoint */
+  0x02,       /*  u8  ep_bmAttributes; Bulk */
+  0x00, 0x04, /*  u16 ep_wMaxPacketSize; 1024 */
+  0x00,       /*  u8  ep_bInterval; */
+  
+  /* Alt Int 1: Bulk-Out companion descriptor */
+  0x06,       /*  u8  epc_bLength; */
+  0x30,       /*  u8  epc_bDescriptorType; Endpoint Companion */
+  0x00,       /*  u8  epc_bMaxPerBurst; */
+  0x00,       /*  u8  epc_bmAttributes; no streams */
+  0x00, 0x00, /*  u16  epc_reserved; */
+  
+  /* Alt Int 1: Bulk-In Pipe usage */
+  0x04,       /*  u8  bLength; */
+  0x24,       /*  u8  bDescriptorType; Function */
+  MSD_UASP_COMMAND, /* u8  bPipeUsage; Command Out pipe */
+  0x00,       /*  u8  breserved; */
+  
+  /***** Status In Pipe *****/
+  /* Alt Int 1: Bulk-In endpoint */
+  0x07,       /*  u8  ep_bLength; */
+  0x05,       /*  u8  ep_bDescriptorType; Endpoint */
+  0x80 | MSD_UASP_STATUS, /* u8  ep_bEndpointAddress; IN Endpoint */
+  0x02,       /*  u8  ep_bmAttributes; Bulk */
+  0x00, 0x04, /*  u16 ep_wMaxPacketSize; 1024 */
+  0x00,       /*  u8  ep_bInterval; */
+  
+  /* Alt Int 1: Bulk-In companion descriptor */
+  0x06,       /*  u8  epc_bLength; */
+  0x30,       /*  u8  epc_bDescriptorType; Endpoint Companion */
+  0x0F,       /*  u8  epc_bMaxPerBurst; */
+  UASP_MAX_STREAMS, /*  u8  epc_bmAttributes; 2^x max streams */
+  0x00, 0x00, /*  u16  epc_reserved; */
+  
+  /* Alt Int 1: Bulk-In Pipe usage */
+  0x04,       /*  u8  bLength; */
+  0x24,       /*  u8  bDescriptorType; Function */
+  MSD_UASP_STATUS, /*  u8  bPipeUsage; Status In pipe */
+  0x00,       /*  u8  breserved; */
+              
+  /***** Data In Pipe *****/
+  /* Alt Int 1: Bulk-In endpoint */
+  0x07,       /*  u8  ep_bLength; */
+  0x05,       /*  u8  ep_bDescriptorType; Endpoint */
+  0x80 | MSD_UASP_DATAIN, /* u8  ep_bEndpointAddress; IN Endpoint */
+  0x02,       /*  u8  ep_bmAttributes; Bulk */
+  0x00, 0x04, /*  u16 ep_wMaxPacketSize; 1024 */
+  0x00,       /*  u8  ep_bInterval; */
+
+  /* Alt Int 1: Bulk-In companion descriptor */
+  0x06,       /*  u8  epc_bLength; */
+  0x30,       /*  u8  epc_bDescriptorType; Endpoint Companion */
+  0x0F,       /*  u8  epc_bMaxPerBurst; */
+  UASP_MAX_STREAMS, /*  u8  epc_bmAttributes; 2^x max streams */
+  0x00, 0x00, /*  u16 epc_reserved; */
+
+  /* Alt Int 1: Bulk-In Pipe usage */
+  0x04,       /*  u8  bLength; */
+  0x24,       /*  u8  bDescriptorType; Function */
+  MSD_UASP_DATAIN, /* u8  bPipeUsage; Data In pipe */
+  0x00,       /*  u8  breserved; */
+
+  /***** Data Out Pipe *****/
+  /* Alt Int 1: Bulk-Out endpoint */
+  0x07,       /*  u8  ep_bLength; */
+  0x05,       /*  u8  ep_bDescriptorType; Endpoint */
+  0x00 | MSD_UASP_DATAOUT, /* u8  ep_bEndpointAddress; OUT Endpoint */
+  0x02,       /*  u8  ep_bmAttributes; Bulk */
+  0x00, 0x04, /*  u16 ep_wMaxPacketSize; 1024 */
+  0x00,       /*  u8  ep_bInterval; */
+
+  /* Alt Int 1: Bulk-Out companion descriptor */
+  0x06,       /*  u8  epc_bLength; */
+  0x30,       /*  u8  epc_bDescriptorType; Endpoint Companion */
+  0x0F,       /*  u8  epc_bMaxPerBurst; */
+  UASP_MAX_STREAMS, /*  u8  epc_bmAttributes; 2^x max streams */
+  0x00, 0x00, /*  u16  epc_reserved; */
+  
+  /* Alt Int 1: Bulk-Out Pipe usage */
+  0x04,       /*  u8  bLength; */
+  0x24,       /*  u8  bDescriptorType; Function */
+  MSD_UASP_DATAOUT, /* u8  bPipeUsage; Data Out pipe */
+  0x00,       /*  u8  breserved; */
 };
 
 // BOS Descriptor
@@ -351,7 +532,7 @@ usb_msd_device_c::usb_msd_device_c(const char *devname)
   d.minspeed = USB_SPEED_FULL;
   d.maxspeed = USB_SPEED_SUPER;
   d.speed = d.minspeed;
-  memset((void*)&s, 0, sizeof(s));
+  memset((void *) &s, 0, sizeof(s));
   if (d.type == USB_MSD_TYPE_DISK) {
     strcpy(d.devname, "BOCHS USB HARDDRIVE");
     s.fname[0] = 0;
@@ -475,12 +656,36 @@ bool usb_msd_device_c::set_option(const char *option)
     } else {
       BX_ERROR(("Option 'sect_size' is only valid for USB disks"));
     }
+  } else if (!strncmp(option, "proto:", 6)) {
+    if (!strcmp(option+6, "uasp")) {
+      s.proto = MSD_PROTO_UASP;
+    } else if (!strcmp(option+6, "bbb")) {
+      s.proto = MSD_PROTO_BBB;
+    } else {
+      BX_ERROR(("Unknown option '%s' for proto:", option+6));
+    }
+    return 1;
   }
   return 0;
 }
 
 bool usb_msd_device_c::init()
 {
+  unsigned i;
+  
+  /*  If you wish to set DEBUG=report in the code, instead of
+   *  in the configuration, simply uncomment this line.  I use
+   *  it when I am working on this emulation.
+   */
+  //LOG_THIS setonoff(LOGLEV_DEBUG, ACT_REPORT);
+  
+  // check to make sure correct speed is used if the proto is uasp
+  if ((s.proto == MSD_PROTO_UASP) && (d.speed < USB_SPEED_HIGH)) {
+    BX_ERROR(("UASP selected on a non-uasp speed device."));
+    s.proto = MSD_PROTO_BBB;
+  }
+
+  d.alt_iface_max = 0;
   if (d.type == USB_MSD_TYPE_DISK) {
     if (strlen(s.fname) > 0) {
       s.hdimage = DEV_hdimage_init_image(s.image_mode, 0, s.journal);
@@ -494,7 +699,7 @@ bool usb_msd_device_c::init()
         s.hdimage->sect_size = s.sect_size;
       }
       if (s.hdimage->open(s.fname) < 0) {
-        BX_ERROR(("could not open hard drive image file '%s'", s.fname));
+        BX_PANIC(("could not open hard drive image file '%s'", s.fname));
         return 0;
       } else {
         s.scsi_dev = new scsi_device_t(s.hdimage, 0, usb_msd_command_complete, (void*)this);
@@ -502,7 +707,7 @@ bool usb_msd_device_c::init()
       sprintf(s.info_txt, "USB HD: path='%s', mode='%s', sect_size=%d", s.fname,
               s.image_mode, s.hdimage->sect_size);
     } else {
-      BX_ERROR(("USB HD: disk image not specified"));
+      BX_PANIC(("USB HD: disk image not specified"));
       return 0;
     }
   } else if (d.type == USB_MSD_TYPE_CDROM) {
@@ -518,26 +723,58 @@ bool usb_msd_device_c::init()
   if (getonoff(LOGLEV_DEBUG) == ACT_REPORT) {
     s.scsi_dev->set_debug_mode();
   }
-  if (get_speed() == USB_SPEED_SUPER) {
+  if (d.speed == USB_SPEED_SUPER) {
     d.dev_descriptor = bx_msd_dev_descriptor3;
     d.config_descriptor = bx_msd_config_descriptor3;
     d.device_desc_size = sizeof(bx_msd_dev_descriptor3);
-    d.config_desc_size = sizeof(bx_msd_config_descriptor3);
+    // we need to set the length of the descriptor per the protocol used
+    if (s.proto == MSD_PROTO_UASP) {
+      * (Bit16u *) &bx_msd_config_descriptor3[2] =
+        d.config_desc_size = sizeof(bx_msd_config_descriptor3);
+      d.alt_iface_max = 1; // allow alt interface 0 through 1
+    } else {
+      * (Bit16u *) &bx_msd_config_descriptor3[2] =
+        d.config_desc_size = 0x002C;
+    }
+    // initialize the bbb's endpoint data
+    handle_iface_change(MSD_PROTO_BBB);
   } else if (get_speed() == USB_SPEED_HIGH) {
     d.dev_descriptor = bx_msd_dev_descriptor2;
     d.config_descriptor = bx_msd_config_descriptor2;
     d.device_desc_size = sizeof(bx_msd_dev_descriptor2);
-    d.config_desc_size = sizeof(bx_msd_config_descriptor2);
-  } else {
+    // we need to set the length of the descriptor per the protocol used
+    if (s.proto == MSD_PROTO_UASP) {
+      * (Bit16u *) &bx_msd_config_descriptor2[2] =
+        d.config_desc_size = sizeof(bx_msd_config_descriptor2);
+      d.alt_iface_max = 1; // allow alt interface 0 through 1
+    } else {
+      * (Bit16u *) &bx_msd_config_descriptor2[2] =
+        d.config_desc_size = 0x0020;
+    }
+    // initialize the bbb's endpoint data
+    handle_iface_change(MSD_PROTO_BBB);
+  } else { // USB_SPEED_FULL
     d.dev_descriptor = bx_msd_dev_descriptor;
     d.config_descriptor = bx_msd_config_descriptor;
     d.device_desc_size = sizeof(bx_msd_dev_descriptor);
     d.config_desc_size = sizeof(bx_msd_config_descriptor);
+    d.endpoint_info[USB_CONTROL_EP].max_packet_size = 64; // Control ep0
+    d.endpoint_info[USB_CONTROL_EP].max_burst_size = 0;
+    d.endpoint_info[MSD_BBB_DATAIN_EP].max_packet_size = 64;  // In ep
+    d.endpoint_info[MSD_BBB_DATAIN_EP].max_burst_size = 0;
+    d.endpoint_info[MSD_BBB_DATAOUT_EP].max_packet_size = 64;  // Out ep
+    d.endpoint_info[MSD_BBB_DATAOUT_EP].max_burst_size = 0;
   }
   d.serial_num = s.scsi_dev->get_serial_number();
   s.mode = USB_MSDM_CBW;
   d.connected = 1;
   s.status_changed = 0;
+  
+  // initialize the uasp stream data
+  for (i=0; i<UASP_MAX_STREAMS_N; i++) {
+    s.uasp_request[i].mode = 0;
+  }
+  
   return 1;
 }
 
@@ -576,6 +813,7 @@ int usb_msd_device_c::handle_control(int request, int value, int index, int leng
 {
   int ret = 0;
 
+  // let the common handler try to handle it first
   ret = handle_control_common(request, value, index, length, data);
   if (ret >= 0) {
     return ret;
@@ -584,18 +822,18 @@ int usb_msd_device_c::handle_control(int request, int value, int index, int leng
   ret = 0;
   switch (request) {
     case DeviceOutRequest | USB_REQ_CLEAR_FEATURE:
-      BX_DEBUG(("USB_REQ_CLEAR_FEATURE: Not handled: %i %i %i %i", request, value, index, length ));
+      BX_DEBUG(("USB_REQ_CLEAR_FEATURE: Not handled: %d %d %d %d", request, value, index, length ));
       goto fail;
       break;
     case DeviceOutRequest | USB_REQ_SET_FEATURE:
-      BX_DEBUG(("USB_REQ_SET_FEATURE:"));
+      BX_DEBUG(("USB_REQ_SET_FEATURE: %d", value));
       switch (value) {
         case USB_DEVICE_REMOTE_WAKEUP:
         case USB_DEVICE_U1_ENABLE:
         case USB_DEVICE_U2_ENABLE:
           break;
         default:
-          BX_DEBUG(("USB_REQ_SET_FEATURE: Not handled: %i %i %i %i", request, value, index, length ));
+          BX_DEBUG(("USB_REQ_SET_FEATURE: Not handled: %d %d %d %d", request, value, index, length ));
           goto fail;
       }
       ret = 0;
@@ -604,35 +842,59 @@ int usb_msd_device_c::handle_control(int request, int value, int index, int leng
       switch (value >> 8) {
         case USB_DT_STRING:
           BX_DEBUG(("USB_REQ_GET_DESCRIPTOR: String"));
-          switch(value & 0xff) {
+          switch (value & 0xFF) {
             case 0xEE:
               // Microsoft OS Descriptor check
               // We don't support this check, so fail
+              BX_INFO(("USB MSD handle_control: Microsoft OS specific 0xEE string descriptor"));
               goto fail;
             default:
-              BX_ERROR(("USB MSD handle_control: unknown string descriptor 0x%02x", value & 0xff));
+              BX_ERROR(("USB MSD handle_control: unknown string descriptor 0x%02x", value & 0xFF));
               goto fail;
           }
           break;
         case USB_DT_DEVICE_QUALIFIER:
           BX_DEBUG(("USB_REQ_GET_DESCRIPTOR: Device Qualifier"));
+          // USB 2.0 Specs: 9.6.1, page 261
+          // only devices with a version of 0x0200 or higher, but less than 0x0300 are allowed
+          //  to request this descriptor.
+          if ((* (Bit16u *) &d.dev_descriptor[2] < 0x0200) || (* (Bit16u *) &d.dev_descriptor[2] >= 0x0300)) {
+            BX_ERROR(("USB MSD handle_control: Only version 0x02?? devices are allowed to request the Device Qualifier"));
+          }
           // device qualifier
           if (d.speed == USB_SPEED_HIGH) {
-            data[0] = 10;
+            data[0] = 10;  // 10 bytes long
             data[1] = USB_DT_DEVICE_QUALIFIER;
-            memcpy(data+2, bx_msd_dev_descriptor+2, 6);
-            data[8] = 1;
-            data[9] = 0;
-            ret = 10;
+            memcpy(data + 2, bx_msd_dev_descriptor + 2, 6);
+            data[8] = 1;  // bNumConfigurations
+            data[9] = 0;  // reserved
+            ret = 10;     // return a 10-byte descriptor
+          } else if (d.speed == USB_SPEED_FULL) {
+            // USB 2.0 Specs: 9.6.2, page 264:
+            // "If a full-speed only device (with a device descriptor version number equal to 0200H) receives a
+            //   GetDescriptor() request for a device_qualifier, it must respond with a request error."
+            // a low-, full- or super-speed device (i.e.: a non high-speed device) must return request error on this function.
+            // *However*, a 'maybe not so recent' (released late 2009) widely used operating system will not continue without
+            //  this function succeeding.
+            data[0] = 10;  // 10 bytes long
+            data[1] = USB_DT_DEVICE_QUALIFIER;
+            memcpy(data + 2, bx_msd_dev_descriptor2 + 2, 6);
+            data[8] = 1;  // bNumConfigurations
+            data[9] = 0;  // reserved
+            ret = 10;     // return a 10-byte descriptor
           } else {
-            // a low-, full- or super-speed device (i.e.: a non high-speed device)
-            // must return request error on this function
-            BX_ERROR(("USB MSD handle_control: full-speed only device returning stall on Device Qualifier."));
+            BX_ERROR(("USB MSD handle_control: full-speed only device returning stall on Device Qualifier Descriptor."));
             goto fail;
           }
           break;
         case USB_DT_BIN_DEV_OBJ_STORE:
           BX_DEBUG(("USB_REQ_GET_DESCRIPTOR: BOS"));
+          // only devices with a version of 0x0210 or higher are allowed to request this descriptor.
+          // note: there are a few devices that indicated version 0x0201 as version 2.1 where as most devices
+          //  correctly use version 0x0210 as version 2.10. Since we don't use 0x0201, there is no need to check...
+          if (* (Bit16u *) &d.dev_descriptor[2] < 0x0210) {
+            BX_ERROR(("USB MSD handle_control: Only version 0x0210+ devices are allowed to request the BOS Descriptor"));
+          }
           if (get_speed() == USB_SPEED_SUPER) {
             memcpy(data, bx_msd_bos_descriptor3, sizeof(bx_msd_bos_descriptor3));
             ret = sizeof(bx_msd_bos_descriptor3);
@@ -646,21 +908,40 @@ int usb_msd_device_c::handle_control(int request, int value, int index, int leng
       break;
     case EndpointOutRequest | USB_REQ_CLEAR_FEATURE:
       BX_DEBUG(("USB_REQ_CLEAR_FEATURE:"));
-      if (value == 0 && index != 0x81) { /* clear ep halt */
+      // Value == 0 == Endpoint Halt (the Guest wants to reset the endpoint)
+      if (value == 0) { /* clear ep halt */
+#if HANDLE_TOGGLE_CONTROL
+        set_toggle(index, 0);
+#endif
+        ret = 0;
+      } else {
+        BX_ERROR(("Bad value for clear feature: %d", value));
         goto fail;
       }
-      ret = 0;
       break;
     case DeviceOutRequest | USB_REQ_SET_SEL:
       // Set U1 and U2 System Exit Latency
       BX_DEBUG(("SET_SEL (U1 and U2):"));
       ret = 0;
       break;
+    case DeviceOutRequest | USB_REQ_SET_ISO_DELAY:
+      // Set Isochronous Delay (USB 3.0+)
+      BX_DEBUG(("USB_REQ_SET_ISO_DELAY: %d", value));
+      if ((index == 0) && (length == 0)) { // index and length must be zero
+        // value = setting (ignored)
+        ret = 0;
+      } else
+        goto fail;
+      break;
     // Class specific requests
     case InterfaceOutClassRequest | MassStorageReset:
     case MassStorageReset:
       BX_DEBUG(("MASS STORAGE RESET:"));
       s.mode = USB_MSDM_CBW;
+#if HANDLE_TOGGLE_CONTROL
+      for (int i=1; i<USB_MAX_ENDPOINTS; i++)
+        set_toggle(i, 0);
+#endif
       ret = 0;
       break;
     case InterfaceInClassRequest | GetMaxLun:
@@ -679,152 +960,220 @@ int usb_msd_device_c::handle_control(int request, int value, int index, int leng
   return ret;
 }
 
+void usb_msd_device_c::handle_iface_change(int iface)
+{
+  if (d.speed == USB_SPEED_SUPER) {
+    d.endpoint_info[USB_CONTROL_EP].max_packet_size = 512; // Control ep0
+    d.endpoint_info[USB_CONTROL_EP].max_burst_size = 0;
+    if (iface == MSD_PROTO_BBB) {
+      // initialize the bbb's endpoint data
+      d.endpoint_info[MSD_BBB_DATAIN_EP].max_packet_size = 1024;  // In ep
+      d.endpoint_info[MSD_BBB_DATAIN_EP].max_burst_size = 15;
+      d.endpoint_info[MSD_BBB_DATAOUT_EP].max_packet_size = 1024;  // Out ep
+      d.endpoint_info[MSD_BBB_DATAOUT_EP].max_burst_size = 15;
+    } else if (iface == MSD_PROTO_UASP) {
+      d.endpoint_info[MSD_UASP_COMMAND].max_packet_size = 1024;
+      d.endpoint_info[MSD_UASP_COMMAND].max_burst_size = 0;
+      d.endpoint_info[MSD_UASP_STATUS].max_packet_size = 1024;
+      d.endpoint_info[MSD_UASP_STATUS].max_burst_size = 15;
+      d.endpoint_info[MSD_UASP_DATAIN].max_packet_size = 1024;
+      d.endpoint_info[MSD_UASP_DATAIN].max_burst_size = 15;
+      d.endpoint_info[MSD_UASP_DATAOUT].max_packet_size = 1024;
+      d.endpoint_info[MSD_UASP_DATAOUT].max_burst_size = 15;
+    } else {
+      BX_ERROR(("Unknown interface number: %d", iface));
+    }
+    // ben
+  } else if (d.speed == USB_SPEED_HIGH) {
+    d.endpoint_info[USB_CONTROL_EP].max_packet_size = 64; // Control ep0
+    d.endpoint_info[USB_CONTROL_EP].max_burst_size = 0;
+    if (iface == MSD_PROTO_BBB) {
+      // initialize the bbb's endpoint data
+      d.endpoint_info[MSD_BBB_DATAIN_EP].max_packet_size = 512;  // In ep
+      d.endpoint_info[MSD_BBB_DATAIN_EP].max_burst_size = 0;
+      d.endpoint_info[MSD_BBB_DATAOUT_EP].max_packet_size = 512;  // Out ep
+      d.endpoint_info[MSD_BBB_DATAOUT_EP].max_burst_size = 0;
+    } else if (iface == MSD_PROTO_UASP) {
+      d.endpoint_info[MSD_UASP_COMMAND].max_packet_size = 512;
+      d.endpoint_info[MSD_UASP_COMMAND].max_burst_size = 0;
+      d.endpoint_info[MSD_UASP_STATUS].max_packet_size = 512;
+      d.endpoint_info[MSD_UASP_STATUS].max_burst_size = 0;
+      d.endpoint_info[MSD_UASP_DATAIN].max_packet_size = 512;
+      d.endpoint_info[MSD_UASP_DATAIN].max_burst_size = 0;
+      d.endpoint_info[MSD_UASP_DATAOUT].max_packet_size = 512;
+      d.endpoint_info[MSD_UASP_DATAOUT].max_burst_size = 0;
+    } else {
+      BX_ERROR(("Unknown interface number: %d", iface));
+    }
+  }  
+}
+
 int usb_msd_device_c::handle_data(USBPacket *p)
 {
   struct usb_msd_cbw cbw;
   int ret = 0;
   Bit8u devep = p->devep;
   Bit8u *data = p->data;
+  Bit8u aIface = get_aIface();
   int len = p->len;
+  bool was_status = false; // so don't dump the status packet twice
 
-  switch (p->pid) {
-    case USB_TOKEN_OUT:
-      usb_dump_packet(data, len, 0, p->devaddr, USB_DIR_OUT | p->devep, USB_TRANS_TYPE_BULK, false, true);
-      if (devep != 2)
-        goto fail;
-
-      switch (s.mode) {
-        case USB_MSDM_CBW:
-          if (len != 31) {
-            BX_ERROR(("bad CBW len"));
-            goto fail;
-          }
-          memcpy(&cbw, data, 31);
-          if (dtoh32(cbw.sig) != 0x43425355) {
-            BX_ERROR(("bad signature %08X", dtoh32(cbw.sig)));
-            goto fail;
-          }
-          BX_DEBUG(("command on LUN %d", cbw.lun));
-          s.tag = dtoh32(cbw.tag);
-          s.data_len = dtoh32(cbw.data_len);
-          if (s.data_len == 0) {
-            s.mode = USB_MSDM_CSW;
-          } else if (cbw.flags & 0x80) {
-            s.mode = USB_MSDM_DATAIN;
-          } else {
-            s.mode = USB_MSDM_DATAOUT;
-          }
-          BX_DEBUG(("command tag 0x%X flags %08X len %d data %d",
-                   s.tag, cbw.flags, cbw.cmd_len, s.data_len));
-          s.residue = 0;
-          s.scsi_dev->scsi_send_command(s.tag, cbw.cmd, cbw.lun, d.async_mode);
-          if (s.residue == 0) {
-            if (s.mode == USB_MSDM_DATAIN) {
-              s.scsi_dev->scsi_read_data(s.tag);
-            } else if (s.mode == USB_MSDM_DATAOUT) {
-              s.scsi_dev->scsi_write_data(s.tag);
-            }
-          }
-          ret = len;
-          break;
-
-        case USB_MSDM_DATAOUT:
-          BX_DEBUG(("data out %d/%d", len, s.data_len));
-          if (len > (int)s.data_len)
-            goto fail;
-
-          s.usb_buf = data;
-          s.usb_len = len;
-          while (s.usb_len && s.scsi_len) {
-            copy_data();
-          }
-          if (s.residue && s.usb_len) {
-            s.data_len -= s.usb_len;
-            if (s.data_len == 0)
-              s.mode = USB_MSDM_CSW;
-            s.usb_len = 0;
-          }
-          if (s.usb_len) {
-            BX_DEBUG(("deferring packet %p", p));
-            usb_defer_packet(p, this);
-            s.packet = p;
-            ret = USB_RET_ASYNC;
-          } else {
-            ret = len;
-          }
-          break;
-
-        default:
-          BX_ERROR(("USB MSD handle_data: unexpected mode at USB_TOKEN_OUT: (0x%02X)", s.mode));
-          goto fail;
-      }
-      break;
-
-    case USB_TOKEN_IN:
-      if (devep != 1)
-        goto fail;
-
-      switch (s.mode) {
-        case USB_MSDM_DATAOUT:
-          if (s.data_len != 0 || len < 13)
-            goto fail;
-          BX_DEBUG(("deferring packet %p", p));
-          usb_defer_packet(p, this);
-          s.packet = p;
-          ret = USB_RET_ASYNC;
-          break;
-
-        case USB_MSDM_CSW:
-          BX_DEBUG(("command status %d tag 0x%x, len %d",
-                    s.result, s.tag, len));
-          if (len < 13)
-            return ret;
-
-          send_status(p);
-          s.mode = USB_MSDM_CBW;
-          ret = 13;
-          break;
-
-        case USB_MSDM_DATAIN:
-          BX_DEBUG(("data in %d/%d", len, s.data_len));
-          if (len > (int)s.data_len)
-            len = s.data_len;
-          s.usb_buf = data;
-          s.usb_len = len;
-          while (s.usb_len && s.scsi_len) {
-            copy_data();
-          }
-          if (s.residue && s.usb_len) {
-            s.data_len -= s.usb_len;
-            memset(s.usb_buf, 0, s.usb_len);
-            if (s.data_len == 0)
-              s.mode = USB_MSDM_CSW;
-            s.usb_len = 0;
-          }
-          if (s.usb_len) {
-            BX_DEBUG(("deferring packet %p", p));
-            usb_defer_packet(p, this);
-            s.packet = p;
-            ret = USB_RET_ASYNC;
-          } else {
-            ret = len;
-          }
-          break;
-
-        default:
-          BX_ERROR(("USB MSD handle_data: unexpected mode at USB_TOKEN_IN: (0x%02X)", s.mode));
-          goto fail;
-      }
-      if (ret > 0) usb_dump_packet(data, ret, 0, p->devaddr, USB_DIR_IN | p->devep, USB_TRANS_TYPE_BULK, false, true);
-      break;
-
-    default:
-      BX_ERROR(("USB MSD handle_data: bad token"));
-fail:
-      d.stall = 1;
-      ret = USB_RET_STALL;
-      break;
+  // check that the length is <= the max packet size of the device
+  if (p->len > get_mps(p->devep)) {
+    BX_DEBUG(("EP%d transfer length (%d) is greater than Max Packet Size (%d).", p->devep, p->len, get_mps(p->devep)));
   }
+
+  // are we doing bbb interface?
+  if (aIface == MSD_PROTO_BBB) {
+    switch (p->pid) {
+      case USB_TOKEN_OUT:
+        usb_dump_packet(data, len, 0, p->devaddr, USB_DIR_OUT | p->devep, USB_TRANS_TYPE_BULK, false, true);
+        if (devep != MSD_BBB_DATAOUT_EP)
+          goto fail;
+
+        switch (s.mode) {
+          case USB_MSDM_CBW:
+            if (len != 31) {
+              BX_ERROR(("bad CBW len (%d)", len));
+              goto fail;
+            }
+            memcpy(&cbw, data, 31);
+            if (dtoh32(cbw.sig) != 0x43425355) {
+              BX_ERROR(("bad signature %08X", dtoh32(cbw.sig)));
+              goto fail;
+            }
+            BX_DEBUG(("command on LUN %d", cbw.lun));
+            s.tag = dtoh32(cbw.tag);
+            s.data_len = dtoh32(cbw.data_len);
+            if (s.data_len == 0) {
+              s.mode = USB_MSDM_CSW;
+            } else if (cbw.flags & 0x80) {
+              s.mode = USB_MSDM_DATAIN;
+            } else {
+              s.mode = USB_MSDM_DATAOUT;
+            }
+            BX_DEBUG(("command tag 0x%X flags %02X cmd_len %d data_len %d",
+                     s.tag, cbw.flags, cbw.cmd_len, s.data_len));
+            s.residue = 0;
+            s.scsi_dev->scsi_send_command(s.tag, cbw.cmd, cbw.cmd_len, cbw.lun, d.async_mode);
+            if (s.residue == 0) {
+              if (s.mode == USB_MSDM_DATAIN) {
+                s.scsi_dev->scsi_read_data(s.tag);
+              } else if (s.mode == USB_MSDM_DATAOUT) {
+                s.scsi_dev->scsi_write_data(s.tag);
+              }
+            }
+            ret = len;
+            break;
+
+          case USB_MSDM_DATAOUT:
+            BX_DEBUG(("data out %d/%d", len, s.data_len));
+            if (len > (int)s.data_len)
+              goto fail;
+
+            s.usb_buf = data;
+            s.usb_len = len;
+            while (s.usb_len && s.scsi_len) {
+              copy_data();
+            }
+            if (s.residue && s.usb_len) {
+              s.data_len -= s.usb_len;
+              if (s.data_len == 0)
+                s.mode = USB_MSDM_CSW;
+              s.usb_len = 0;
+            }
+            if (s.usb_len) {
+              BX_DEBUG(("deferring packet %p", p));
+              usb_defer_packet(p, this);
+              s.packet = p;
+              ret = USB_RET_ASYNC;
+            } else {
+              ret = len;
+            }
+            break;
+
+          default:
+            BX_ERROR(("USB MSD handle_data: unexpected mode at USB_TOKEN_OUT: (0x%02X)", s.mode));
+            goto fail;
+        }
+        break;
+
+      case USB_TOKEN_IN:
+        if (devep != MSD_BBB_DATAIN_EP)
+          goto fail;
+
+        switch (s.mode) {
+          case USB_MSDM_DATAOUT:
+            if (s.data_len != 0 || len < 13)
+              goto fail;
+            BX_DEBUG(("deferring packet %p", p));
+            usb_defer_packet(p, this);
+            s.packet = p;
+            ret = USB_RET_ASYNC;
+            break;
+
+          case USB_MSDM_CSW:
+            BX_DEBUG(("command status %d tag 0x%x, len %d",
+                      s.result, s.tag, len));
+            if (len < 13)
+              return ret;
+
+            send_status(p);
+            s.mode = USB_MSDM_CBW;
+            was_status = true;
+            ret = 13;
+            break;
+
+          case USB_MSDM_DATAIN:
+            BX_DEBUG(("data in %d/%d", len, s.data_len));
+            if (len > (int)s.data_len)
+              len = s.data_len;
+            s.usb_buf = data;
+            s.usb_len = len;
+            while (s.usb_len && s.scsi_len) {
+              copy_data();
+            }
+            if (s.residue && s.usb_len) {
+              s.data_len -= s.usb_len;
+              memset(s.usb_buf, 0, s.usb_len);
+              if (s.data_len == 0)
+                s.mode = USB_MSDM_CSW;
+              s.usb_len = 0;
+            }
+            if (s.usb_len) {
+              BX_DEBUG(("deferring packet %p", p));
+              usb_defer_packet(p, this);
+              s.packet = p;
+              ret = USB_RET_ASYNC;
+            } else {
+              ret = len;
+            }
+            break;
+
+          default:
+            BX_ERROR(("USB MSD handle_data: unexpected mode at USB_TOKEN_IN: (0x%02X)", s.mode));
+            goto fail;
+        }
+        if (!was_status && (ret > 0)) usb_dump_packet(data, ret, 0, p->devaddr, USB_DIR_IN | p->devep, USB_TRANS_TYPE_BULK, false, true);
+        break;
+
+      default:
+        BX_ERROR(("USB MSD handle_data: bad token"));
+  fail:
+        d.stall = 1;
+        ret = USB_RET_STALL;
+        break;
+    }
+    
+  // must be uasp interface
+  } else if (aIface == MSD_PROTO_UASP) {
+    ret = uasp_handle_data(p);
+    
+  } else {
+    BX_ERROR(("Unknown interface number: %d", aIface));    
+    d.stall = 1;
+    ret = USB_RET_STALL;
+  } 
 
   return ret;
 }
@@ -875,52 +1224,60 @@ void usb_msd_device_c::usb_msd_command_complete(void *this_ptr, int reason, Bit3
 void usb_msd_device_c::command_complete(int reason, Bit32u tag, Bit32u arg)
 {
   USBPacket *p = s.packet;
+  Bit8u aIface = get_aIface();
 
-  if (tag != s.tag) {
-    BX_ERROR(("usb-msd_command_complete: unexpected SCSI tag 0x%x", tag));
-  }
-  if (reason == SCSI_REASON_DONE) {
-    BX_DEBUG(("command complete %d", arg));
-    s.residue = s.data_len;
-    s.result = arg != 0;
-    if (s.packet) {
-      if ((s.data_len == 0) && (s.mode == USB_MSDM_DATAOUT)) {
-        send_status(p);
-        s.mode = USB_MSDM_CBW;
-      } else if (s.mode == USB_MSDM_CSW) {
-        send_status(p);
-        s.mode = USB_MSDM_CBW;
-      } else {
-        if (s.data_len) {
-          s.data_len -= s.usb_len;
-          if (s.mode == USB_MSDM_DATAIN)
-            memset(s.usb_buf, 0, s.usb_len);
-          s.usb_len = 0;
+  // if bulk/bulk/bulk
+  if (aIface == MSD_PROTO_BBB) {
+    if (tag != s.tag) {
+      BX_ERROR(("usb-msd_command_complete: unexpected SCSI tag 0x%x", tag));
+    }
+    if (reason == SCSI_REASON_DONE) {
+      BX_DEBUG(("command complete %d", arg));
+      s.residue = s.data_len;
+      s.result = arg != 0;
+      if (s.packet) {
+        if ((s.data_len == 0) && (s.mode == USB_MSDM_DATAOUT)) {
+          send_status(p);
+          s.mode = USB_MSDM_CBW;
+        } else if (s.mode == USB_MSDM_CSW) {
+          send_status(p);
+          s.mode = USB_MSDM_CBW;
+        } else {
+          if (s.data_len) {
+            s.data_len -= s.usb_len;
+            if (s.mode == USB_MSDM_DATAIN)
+              memset(s.usb_buf, 0, s.usb_len);
+            s.usb_len = 0;
+          }
+          if (s.data_len == 0)
+            s.mode = USB_MSDM_CSW;
         }
-        if (s.data_len == 0)
-          s.mode = USB_MSDM_CSW;
-      }
-      s.packet = NULL;
-      usb_packet_complete(p);
-    } else if (s.data_len == 0) {
-      s.mode = USB_MSDM_CSW;
-    }
-    return;
-  }
-  s.scsi_len = arg;
-  s.scsi_buf = s.scsi_dev->scsi_get_buf(tag);
-  if (p) {
-    if ((s.scsi_len > 0) && (s.mode == USB_MSDM_DATAIN)) {
-      usb_dump_packet(s.scsi_buf, p->len, 0, p->devaddr, USB_DIR_OUT | p->devep, USB_TRANS_TYPE_BULK, false, true);
-    }
-    copy_data();
-    if (s.usb_len == 0) {
-      BX_DEBUG(("packet complete %p", p));
-      if (s.packet != NULL) {
         s.packet = NULL;
         usb_packet_complete(p);
+      } else if (s.data_len == 0) {
+        s.mode = USB_MSDM_CSW;
+      }
+      return;
+    }
+    s.scsi_len = arg;
+    s.scsi_buf = s.scsi_dev->scsi_get_buf(tag);
+    if (p) {
+      if ((s.scsi_len > 0) && (s.mode == USB_MSDM_DATAIN)) {
+        usb_dump_packet(s.scsi_buf, p->len, 0, p->devaddr, USB_DIR_IN | p->devep, USB_TRANS_TYPE_BULK, false, true);
+      }
+      copy_data();
+      if (s.usb_len == 0) {
+        BX_DEBUG(("packet complete %p", p));
+        if (s.packet != NULL) {
+          s.packet = NULL;
+          usb_packet_complete(p);
+        }
       }
     }
+  
+  // else if uasp
+  } else if (aIface == MSD_PROTO_UASP) {
+    uasp_command_complete(reason, tag, arg);
   }
 }
 
