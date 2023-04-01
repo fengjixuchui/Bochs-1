@@ -254,6 +254,7 @@ bool usb_hub_device_c::init()
   bx_list_c *port, *deplist;
   bx_param_enum_c *device;
   bx_param_string_c *options;
+  bx_param_bool_c *overcurrent;
 
   // set up config descriptor, status and runtime config for hub.n_ports
   bx_hub_config_descriptor[22] = (hub.n_ports + 1 + 7) / 8;
@@ -272,8 +273,14 @@ bool usb_hub_device_c::init()
     options = new bx_param_string_c(port, "options", "Options", "", "",
       BX_PATHNAME_LEN);
     options->set_enable_handler(hub_param_enable_handler);
+    overcurrent = new bx_param_bool_c(port, 
+      "over_current",
+      "signal over-current",
+      "signal over-current", 0);
+    overcurrent->set_handler(hub_param_oc_handler);
     deplist = new bx_list_c(NULL);
     deplist->add(options);
+    deplist->add(overcurrent);
     device->set_dependent_list(deplist, 1);
     device->set_dependent_bitmap(0, 0);
   }
@@ -585,11 +592,13 @@ int usb_hub_device_c::handle_packet(USBPacket *p)
   return usb_device_c::handle_packet(p);
 }
 
+int hub_event_handler(int event, void *ptr, void *dev, int port);
+
 void usb_hub_device_c::init_device(Bit8u port, bx_list_c *portconf)
 {
   char pname[BX_PATHNAME_LEN];
 
-  if (DEV_usb_init_device(portconf, this, &hub.usb_port[port].device)) {
+  if (DEV_usb_init_device(portconf, this, &hub.usb_port[port].device, hub_event_handler, port)) {
     if (usb_set_connect_status(port, 1)) {
       portconf->get_by_name("options")->set_enabled(0);
       sprintf(pname, "port%d.device", port+1);
@@ -601,35 +610,49 @@ void usb_hub_device_c::init_device(Bit8u port, bx_list_c *portconf)
 
 void usb_hub_device_c::remove_device(Bit8u port)
 {
-  // TODO: there is something wrong with 'delete'ing hub.usb_port[port].device
-  //  Bochs crashes and doesn't delete the .lock file when we close Bochs
   if (hub.usb_port[port].device != NULL) {
-    
-    delete hub.usb_port[port].device;    // this is the culprit. Somewhere in the destruction of usb_device_c, something happens.
-                                         // simply freeing (free(hub.usb_port[port].device)) it, doesn't crash, so it is one of the destructors...
+    delete hub.usb_port[port].device;
     hub.usb_port[port].device = NULL;
   }
 }
 
-void hub_event_handler(int event, USBPacket *packet, void *dev, int port)
+int hub_event_handler(int event, void *ptr, void *dev, int port)
 {
   if (dev != NULL) {
-    ((usb_hub_device_c *) dev)->event_handler(event, packet, port);
+    return ((usb_hub_device_c *) dev)->event_handler(event, ptr, port);
   }
+  return -1;
 }
 
-void usb_hub_device_c::event_handler(int event, USBPacket *packet, int port)
+int usb_hub_device_c::event_handler(int event, void *ptr, int port)
 {
-  if (event == USB_EVENT_WAKEUP) {
-    if (hub.usb_port[port].PortStatus & PORT_STAT_SUSPEND) {
-      hub.usb_port[port].PortChange |= PORT_STAT_C_SUSPEND;
-    }
-    if (d.event.dev != NULL) {
-      d.event.cb(USB_EVENT_WAKEUP, NULL, d.event.dev, d.event.port);
-    }
-  } else {
-    BX_ERROR(("unknown/unsupported event (id=%d) on port #%d", event, port+1));
+  int ret = 0;
+
+  switch (event) {
+    // packet events start here
+    case USB_EVENT_WAKEUP:
+      if (hub.usb_port[port].PortStatus & PORT_STAT_SUSPEND) {
+        hub.usb_port[port].PortChange |= PORT_STAT_C_SUSPEND;
+      }
+      if (d.event.dev != NULL) {
+        d.event.cb(USB_EVENT_WAKEUP, NULL, d.event.dev, d.event.port);
+      }
+      break;
+
+    // host controller events start here
+    case USB_EVENT_CHECK_SPEED:
+      if (ptr != NULL) {
+        usb_device_c *usb_device = (usb_device_c *) ptr;
+        if (usb_device->get_speed() <= d.speed)
+          ret = 1;
+      }
+      break;
+    default:
+      BX_ERROR(("unknown/unsupported event (id=%d) on port #%d", event, port+1));
+      ret = -1; // unknown event, event not handled
   }
+  
+  return ret;
 }
 
 bool usb_hub_device_c::usb_set_connect_status(Bit8u port, bool connected)
@@ -672,7 +695,6 @@ bool usb_hub_device_c::usb_set_connect_status(Bit8u port, bool connected)
           BX_INFO(("hub #%d, port #%d: connect: %s", hubnum, port+1, device->get_info()));
         }
       }
-      device->set_event_handler(this, hub_event_handler, port);
     } else {
       BX_INFO(("hub #%d, port #%d: device disconnect", hubnum, port+1));
       if (d.event.dev != NULL) {
@@ -762,6 +784,28 @@ bool usb_hub_device_c::hub_param_enable_handler(bx_param_c *param, bool en)
     }
   }
   return en;
+}
+
+// USB runtime parameter handler: over-current
+Bit64s usb_hub_device_c::hub_param_oc_handler(bx_param_c *param, bool set, Bit64s val)
+{
+  int portnum;
+  usb_hub_device_c *hub;
+  bx_list_c *port;
+
+  if (set && val) {
+    port = (bx_list_c *) param->get_parent();
+    hub = (usb_hub_device_c *) (port->get_parent()->get_device_param());
+    if (hub != NULL) {
+      portnum = atoi(port->get_name()+4) - 1;
+      hub->hub.usb_port[portnum].PortStatus &= ~PORT_STAT_POWER;
+      hub->hub.usb_port[portnum].PortStatus |= PORT_STAT_OVERCURRENT;
+      hub->hub.usb_port[portnum].PortChange |= PORT_STAT_C_OVERCURRENT;
+      BX_DEBUG(("Over-current signaled on port #%d.", portnum + 1));
+    }
+  }
+
+  return 0; // clear the indicator for next time
 }
 
 void usb_hub_restore_handler(void *dev, bx_list_c *conf)

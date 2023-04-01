@@ -148,8 +148,6 @@ static Bit8u ext_caps[EXT_CAPS_SIZE] = {
 // builtin configuration handling functions
 Bit32s usb_xhci_options_parser(const char *context, int num_params, char *params[])
 {
-  int max_ports;
-  
   if (!strcmp(params[0], "usb_xhci")) {
     bx_list_c *base = (bx_list_c*) SIM->get_param(BXPN_USB_XHCI);
     for (int i = 1; i < num_params; i++) {
@@ -163,7 +161,7 @@ Bit32s usb_xhci_options_parser(const char *context, int num_params, char *params
         else
           BX_PANIC(("%s: unknown parameter '%s' for usb_xhci: model=", context, &params[i][6]));
       } else if (!strncmp(params[i], "n_ports=", 8)) {
-        max_ports = (int) strtol(&params[i][8], NULL, 10);
+        int max_ports = (int) strtol(&params[i][8], NULL, 10);
         if ((max_ports >= 2) && (max_ports <= USB_XHCI_PORTS_MAX) && !(max_ports & 1))
           SIM->get_param_num(BXPN_XHCI_N_PORTS)->set(max_ports);
         else
@@ -225,7 +223,7 @@ bx_usb_xhci_c::bx_usb_xhci_c()
 
 bx_usb_xhci_c::~bx_usb_xhci_c()
 {
-  char pname[16];
+  char pname[32];
 
   SIM->unregister_runtime_config_handler(rt_conf_id);
 
@@ -234,6 +232,8 @@ bx_usb_xhci_c::~bx_usb_xhci_c()
     SIM->get_param_enum(pname, SIM->get_param(BXPN_USB_XHCI))->set_handler(NULL);
     sprintf(pname, "port%d.options", i+1);
     SIM->get_param_string(pname, SIM->get_param(BXPN_USB_XHCI))->set_enable_handler(NULL);
+    sprintf(pname, "port%d.over_current", i+1);
+    SIM->get_param_bool(pname, SIM->get_param(BXPN_USB_XHCI))->set_handler(NULL);
     remove_device(i);
   }
 
@@ -251,6 +251,7 @@ void bx_usb_xhci_c::init(void)
   bx_list_c *xhci, *port;
   bx_param_enum_c *device;
   bx_param_string_c *options;
+  bx_param_bool_c *over_current;
   struct XHCI_PROTOCOL *protocol;
 
   /*  If you wish to set DEBUG=report in the code, instead of
@@ -303,7 +304,7 @@ void bx_usb_xhci_c::init(void)
   Bit32s n_ports = SIM->get_param_num(BXPN_XHCI_N_PORTS)->get();
   if (n_ports > -1) BX_XHCI_THIS hub.n_ports = n_ports;
   if ((BX_XHCI_THIS hub.n_ports < 2) || (BX_XHCI_THIS hub.n_ports > USB_XHCI_PORTS_MAX) || (BX_XHCI_THIS hub.n_ports & 1)) {
-    BX_PANIC(("n_ports (%d) must be at least 2, not more than 10, and must be an even number.", BX_XHCI_THIS hub.n_ports));
+    BX_PANIC(("n_ports (%d) must be at least 2, not more than %d, and must be an even number.", BX_XHCI_THIS hub.n_ports, USB_XHCI_PORTS_MAX));
     return;
   }
 
@@ -342,6 +343,8 @@ void bx_usb_xhci_c::init(void)
     device->set_handler(usb_param_handler);
     options = (bx_param_string_c*)port->get_by_name("options");
     options->set_enable_handler(usb_param_enable_handler);
+    over_current = (bx_param_bool_c*)port->get_by_name("over_current");
+    over_current->set_handler(usb_param_oc_handler);
     BX_XHCI_THIS hub.usb_port[i].device = NULL;
     BX_XHCI_THIS hub.usb_port[i].portsc.ccs = 0;
     BX_XHCI_THIS hub.usb_port[i].portsc.csc = 0;
@@ -648,7 +651,7 @@ void bx_usb_xhci_c::reset_hc()
       sprintf(pname, "port%d", i+1);
       init_device(i, (bx_list_c *) SIM->get_param(pname, SIM->get_param(BXPN_USB_XHCI)));
     } else {
-      usb_set_connect_status(i, 1);
+      set_connect_status(i, 1);
     }
   }
 
@@ -1086,12 +1089,14 @@ void bx_usb_xhci_c::after_restore_state(void)
   }
 }
 
+int xhci_event_handler(int event, void *ptr, void *dev, int port);
+
 void bx_usb_xhci_c::init_device(Bit8u port, bx_list_c *portconf)
 {
   char pname[BX_PATHNAME_LEN];
 
-  if (DEV_usb_init_device(portconf, BX_XHCI_THIS_PTR, &BX_XHCI_THIS hub.usb_port[port].device)) {
-    if (usb_set_connect_status(port, 1)) {
+  if (DEV_usb_init_device(portconf, BX_XHCI_THIS_PTR, &BX_XHCI_THIS hub.usb_port[port].device, xhci_event_handler, port)) {
+    if (set_connect_status(port, 1)) {
       portconf->get_by_name("options")->set_enabled(0);
       sprintf(pname, "usb_xhci.hub.port%d.device", port+1);
       bx_list_c *sr_list = (bx_list_c *) SIM->get_param(pname, SIM->get_bochs_root());
@@ -1099,7 +1104,8 @@ void bx_usb_xhci_c::init_device(Bit8u port, bx_list_c *portconf)
     } else {
       ((bx_param_enum_c*)portconf->get_by_name("device"))->set_by_name("none");
       ((bx_param_string_c*)portconf->get_by_name("options"))->set("none");
-      usb_set_connect_status(port, 0);
+      ((bx_param_bool_c*)portconf->get_by_name("over_current"))->set(0);
+      set_connect_status(port, 0);
     }
   }
 }
@@ -1611,7 +1617,6 @@ bool bx_usb_xhci_c::write_handler(bx_phy_address addr, unsigned len, void *data,
         BX_XHCI_THIS hub.op_regs.HcStatus.pcd     = (value & (1 <<  4)) ? 0 : BX_XHCI_THIS hub.op_regs.HcStatus.pcd;
         BX_XHCI_THIS hub.op_regs.HcStatus.eint    = (value & (1 <<  3)) ? 0 : BX_XHCI_THIS hub.op_regs.HcStatus.eint;
         BX_XHCI_THIS hub.op_regs.HcStatus.hse     = (value & (1 <<  2)) ? 0 : BX_XHCI_THIS hub.op_regs.HcStatus.hse;
-        //FIXME: should this line go where system software clears the IP bit, or here when it clears the status:eint bit?
         if (value & (1 << 3))  // acknowledging the interrupt
           DEV_pci_set_irq(BX_XHCI_THIS devfunc, BX_XHCI_THIS pci_conf[0x3d], 0);
         break;
@@ -2079,46 +2084,77 @@ void bx_usb_xhci_c::put_stream_info(struct STREAM_CONTEXT *context, const Bit64u
   }
 }
 
-void xhci_event_handler(int event, USBPacket *packet, void *dev, int port)
+int xhci_event_handler(int event, void *ptr, void *dev, int port)
 {
-  ((bx_usb_xhci_c*)dev)->event_handler(event, packet, port);
+  if (dev != NULL) {
+    return ((bx_usb_xhci_c*)dev)->event_handler(event, ptr, port);
+  }
+  return -1;
 }
 
-void bx_usb_xhci_c::event_handler(int event, USBPacket *packet, int port)
+int bx_usb_xhci_c::event_handler(int event, void *ptr, int port)
 {
-  int slot, ep;
+  int slot, ep, ret = 0;
+  USBAsync *p;
 
-  if (event == USB_EVENT_ASYNC) {
-    BX_DEBUG(("Experimental async packet completion"));
-    USBAsync *p = container_of_usb_packet(packet);
-    p->done = 1;
-    slot = (p->slot_ep >> 8);
-    ep = (p->slot_ep & 0xff);
-    if (BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.max_pstreams > 0) {   // specifying streams
-      BX_DEBUG(("Event Handler: USB_EVENT_ASYNC: slot %d, ep %d, stream ID %d", slot, ep, p->packet.strm_pid));
-      BX_XHCI_THIS hub.slots[slot].ep_context[ep].stream[p->packet.strm_pid].tr_dequeue_pointer =
-        BX_XHCI_THIS process_transfer_ring(slot, ep, BX_XHCI_THIS hub.slots[slot].ep_context[ep].stream[p->packet.strm_pid].tr_dequeue_pointer, 
-                                                    &BX_XHCI_THIS hub.slots[slot].ep_context[ep].stream[p->packet.strm_pid].dcs, p->packet.strm_pid);
-    } else {
-      BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer =
-        BX_XHCI_THIS process_transfer_ring(slot, ep, BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer,
-                                                    &BX_XHCI_THIS hub.slots[slot].ep_context[ep].rcs, 0);
-    }
-  } else if (event == USB_EVENT_WAKEUP) {
-    if (BX_XHCI_THIS hub.usb_port[port].portsc.pls != PLS_U3_SUSPENDED) {
-      return;
-    }
-    BX_XHCI_THIS hub.usb_port[port].portsc.pls = PLS_RESUME;
-    if (!BX_XHCI_THIS hub.usb_port[port].portsc.plc) {
-      BX_XHCI_THIS hub.usb_port[port].portsc.plc = 1;
-      if (BX_XHCI_THIS hub.op_regs.HcStatus.hch) {
-        return;
+  switch (event) {
+    // packet events start here
+    case USB_EVENT_ASYNC:
+      BX_DEBUG(("Experimental async packet completion"));
+      p = container_of_usb_packet(ptr);
+      p->done = 1;
+      slot = (p->slot_ep >> 8);
+      ep = (p->slot_ep & 0xff);
+      if (BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.max_pstreams > 0) {   // specifying streams
+        BX_DEBUG(("Event Handler: USB_EVENT_ASYNC: slot %d, ep %d, stream ID %d", slot, ep, p->packet.strm_pid));
+        BX_XHCI_THIS hub.slots[slot].ep_context[ep].stream[p->packet.strm_pid].tr_dequeue_pointer =
+          BX_XHCI_THIS process_transfer_ring(slot, ep, BX_XHCI_THIS hub.slots[slot].ep_context[ep].stream[p->packet.strm_pid].tr_dequeue_pointer, 
+                                                      &BX_XHCI_THIS hub.slots[slot].ep_context[ep].stream[p->packet.strm_pid].dcs, p->packet.strm_pid);
+      } else {
+        BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer =
+          BX_XHCI_THIS process_transfer_ring(slot, ep, BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer,
+                                                      &BX_XHCI_THIS hub.slots[slot].ep_context[ep].rcs, 0);
       }
-      write_event_TRB(0, ((port + 1) << 24), TRB_SET_COMP_CODE(1), TRB_SET_TYPE(PORT_STATUS_CHANGE), 1);
-    }
-  } else {
-    BX_ERROR(("unknown/unsupported event (id=%d) on port #%d", event, port+1));
+      break;
+    case USB_EVENT_WAKEUP:
+      if (BX_XHCI_THIS hub.usb_port[port].portsc.pls != PLS_U3_SUSPENDED) {
+        break;
+      }
+      BX_XHCI_THIS hub.usb_port[port].portsc.pls = PLS_RESUME;
+      if (!BX_XHCI_THIS hub.usb_port[port].portsc.plc) {
+        BX_XHCI_THIS hub.usb_port[port].portsc.plc = 1;
+        if (BX_XHCI_THIS hub.op_regs.HcStatus.hch) {
+          break;
+        }
+        write_event_TRB(0, ((port + 1) << 24), TRB_SET_COMP_CODE(1), TRB_SET_TYPE(PORT_STATUS_CHANGE), 1);
+      }
+      break;
+      
+    // host controller events start here
+    case USB_EVENT_CHECK_SPEED:
+      // all super-speed device must be on the first half port register sets,
+      //  while all non-super-speed device must be on the second half.
+      if (ptr != NULL) {
+        usb_device_c *usb_device = (usb_device_c *) ptr;
+        if ((usb_device->get_speed() == USB_SPEED_SUPER) &&
+            (BX_XHCI_THIS hub.usb_port[port].is_usb3 != 1)) {
+          ret = 0; // given speed is not allowed on this port
+          break;
+        }
+        if ((usb_device->get_speed() != USB_SPEED_SUPER) &&
+            (BX_XHCI_THIS hub.usb_port[port].is_usb3 != 0)) {
+          ret = 0; // given speed is not allowed on this port
+          break;
+        }
+        ret = 1; // given speed is allowed on this port
+      }
+      break;
+    default:
+      BX_ERROR(("unknown/unsupported event (id=%d) on port #%d", event, port+1));
+      ret = -1; // unknown event, event not handled
   }
+
+  return ret;
 }
 
 // This function checks and processes all enqueued TRB's in the EP's transfer ring
@@ -2435,7 +2471,8 @@ void bx_usb_xhci_c::process_command_ring(void)
   unsigned i, j;
   int slot, ep, comp_code = 0, new_addr = 0, bsr = 0, trb_command;
   Bit32u a_flags, d_flags;
-  Bit64u org_addr;
+  Bit64u org_addr, temp_addr;
+  bool temp_dcs;
   Bit8u buffer[CONTEXT_SIZE + (32 * CONTEXT_SIZE)];
   struct SLOT_CONTEXT slot_context;
   struct EP_CONTEXT   ep_context;
@@ -2773,13 +2810,32 @@ void bx_usb_xhci_c::process_command_ring(void)
         if (BX_XHCI_THIS hub.slots[slot].enabled == 1) {
           if ((BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.ep_state == EP_STATE_STOPPED) ||
               (BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.ep_state == EP_STATE_ERROR)) {
-            BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.tr_dequeue_pointer =
-              BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer = (trb.parameter & (Bit64u) ~0xF);
-            BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.dcs =
-              BX_XHCI_THIS hub.slots[slot].ep_context[ep].rcs = (bool) (trb.parameter & 1);
-            BX_XHCI_THIS hub.slots[slot].ep_context[ep].edtla = 0;
-            update_ep_context(slot, ep);
-            comp_code = TRB_SUCCESS;
+            // is this endpoint using streams?
+            if (BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.max_pstreams > 0) {   // specifying streams
+              unsigned stream_id = TRB_GET_STREAM(trb.status);
+              if ((stream_id > 0) && (stream_id < MAX_PSA_SIZE_NUM) &&
+                  (stream_id < PSA_MAX_SIZE_NUM(BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.max_pstreams)) &&
+                   BX_XHCI_THIS hub.slots[slot].ep_context[ep].stream[stream_id].valid == 1) {
+                BX_XHCI_THIS hub.slots[slot].ep_context[ep].stream[stream_id].tr_dequeue_pointer =
+                  temp_addr = (trb.parameter & (Bit64u) ~0xF);
+                BX_XHCI_THIS hub.slots[slot].ep_context[ep].stream[stream_id].dcs =
+                  temp_dcs = (trb.parameter & 1) > 0;
+                update_ep_context(slot, ep);
+                comp_code = TRB_SUCCESS;
+              } else {
+                comp_code = INVALID_STREAM_ID;
+              }
+            } else {
+              BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.tr_dequeue_pointer =
+                BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer = 
+                temp_addr = (trb.parameter & (Bit64u) ~0xF);
+              BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.dcs =
+                BX_XHCI_THIS hub.slots[slot].ep_context[ep].rcs = 
+                temp_dcs = (trb.parameter & 1) > 0;
+              BX_XHCI_THIS hub.slots[slot].ep_context[ep].edtla = 0;
+              update_ep_context(slot, ep);
+              comp_code = TRB_SUCCESS;
+            }
           } else
             comp_code = CONTEXT_STATE_ERROR;
         } else
@@ -2793,8 +2849,7 @@ void bx_usb_xhci_c::process_command_ring(void)
         BX_DEBUG(("0x" FORMATADDRESS ": Command Ring: Found Set_tr_Dequeue TRB (slot = %d) (ep = %d) (returning %d)",
           (bx_phy_address) org_addr, slot, ep, comp_code));
         if (comp_code == TRB_SUCCESS)
-          BX_INFO(("  New address: 0x" FORMATADDRESS " state = %d", (bx_phy_address) BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer,
-            BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.dcs));
+          BX_DEBUG(("  New address: 0x" FORMATADDRESS " state = %d", temp_addr, temp_dcs));
         break;
 
 //      case RESET_EP:
@@ -3001,13 +3056,9 @@ void bx_usb_xhci_c::update_ep_context(const int slot, const int ep)
   // do we need to update the stream context?
   if (BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.max_pstreams > 0) {
     for (i=1; i<PSA_MAX_SIZE_NUM(BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.max_pstreams) && (i < MAX_PSA_SIZE_NUM); i++) {
-      if ((BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer != 0) && 
-          (BX_XHCI_THIS hub.slots[slot].ep_context[ep].stream[i].tr_dequeue_pointer != 0)) {
+      if (BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer != 0) {
         put_stream_info(&BX_XHCI_THIS hub.slots[slot].ep_context[ep].stream[i],
                          BX_XHCI_THIS hub.slots[slot].ep_context[ep].enqueue_pointer, i);
-        // if the ep is disabled (halted), we clear our pointer so we reload it next time
-        if (BX_XHCI_THIS hub.slots[slot].ep_context[ep].ep_context.ep_state != EP_STATE_RUNNING)
-          BX_XHCI_THIS hub.slots[slot].ep_context[ep].stream[i].tr_dequeue_pointer = 0;
       }
     }
   }
@@ -3487,6 +3538,12 @@ void bx_usb_xhci_c::xhci_timer(void)
     */
   for (port=0; port<BX_XHCI_THIS hub.n_ports; port++) {
     new_psceg = get_psceg(port);
+    // if any bit has transitioned from 0 to 1 (in any port),
+    //  set the pcd bit in the host status register.
+    if ((new_psceg & BX_XHCI_THIS hub.usb_port[port].psceg) > 0)
+      BX_XHCI_THIS hub.op_regs.HcStatus.pcd = 1;
+    // clear any bits that have been cleared by the guest,
+    //  if we are now zero *and* there are any new bits set, send a Change Event.
     BX_XHCI_THIS hub.usb_port[port].psceg &= new_psceg;
     if ((BX_XHCI_THIS hub.usb_port[port].psceg == 0) && (new_psceg != 0)) {
       BX_DEBUG(("Port #%d Status Change Event: (%2Xh)", port + 1, new_psceg));
@@ -3536,7 +3593,7 @@ void bx_usb_xhci_c::runtime_config(void)
         sprintf(pname, "port%d", i + 1);
         init_device(i, (bx_list_c *) SIM->get_param(pname, SIM->get_param(BXPN_USB_XHCI)));
       } else {
-        usb_set_connect_status(i, 0);
+        set_connect_status(i, 0);
       }
       BX_XHCI_THIS device_change &= ~(1 << i);
     }
@@ -3585,7 +3642,7 @@ void bx_usb_xhci_c::pci_write_handler(Bit8u address, Bit32u value, unsigned io_l
   }
 }
 
-bool bx_usb_xhci_c::usb_set_connect_status(Bit8u port, bool connected)
+bool bx_usb_xhci_c::set_connect_status(Bit8u port, bool connected)
 {
   const bool ccs_org = BX_XHCI_THIS hub.usb_port[port].portsc.ccs;
   const bool ped_org = BX_XHCI_THIS hub.usb_port[port].portsc.ped;
@@ -3642,7 +3699,6 @@ bool bx_usb_xhci_c::usb_set_connect_status(Bit8u port, bool connected)
           BX_INFO(("port #%d: connect: %s", port+1, device->get_info()));
         }
       }
-      device->set_event_handler(BX_XHCI_THIS_PTR, xhci_event_handler, port);
     } else { // not connected
         BX_INFO(("port #%d: device disconnect", port+1));
         BX_XHCI_THIS hub.usb_port[port].portsc.ccs = 0;
@@ -3681,6 +3737,28 @@ Bit64s bx_usb_xhci_c::usb_param_handler(bx_param_c *param, bool set, Bit64s val)
     }
   }
   return val;
+}
+
+// USB runtime parameter handler: over-current
+Bit64s bx_usb_xhci_c::usb_param_oc_handler(bx_param_c *param, bool set, Bit64s val)
+{
+  int portnum;
+
+  if (set) {
+    portnum = atoi((param->get_parent())->get_name()+4) - 1;
+    if ((portnum >= 0) && (portnum < (int) BX_XHCI_THIS hub.n_ports)) {
+      if (val) {
+        if (BX_XHCI_THIS hub.usb_port[portnum].portsc.ccs) {
+          BX_XHCI_THIS hub.usb_port[portnum].portsc.occ = 1;
+          BX_XHCI_THIS hub.usb_port[portnum].portsc.oca = 1;
+          BX_DEBUG(("Over-current signaled on port #%d.", portnum + 1));
+          write_event_TRB(0, ((portnum + 1) << 24), TRB_SET_COMP_CODE(1), TRB_SET_TYPE(PORT_STATUS_CHANGE), 1);
+        }
+      }
+    }
+  }
+
+  return 0; // clear the indicator for next time
 }
 
 // USB runtime parameter enable handler

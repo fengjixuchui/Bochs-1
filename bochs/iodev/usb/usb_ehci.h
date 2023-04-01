@@ -332,7 +332,7 @@ public:
   virtual void after_restore_state(void);
   virtual void pci_write_handler(Bit8u address, Bit32u value, unsigned io_len);
 
-  void event_handler(int event, USBPacket *packet, int port);
+  int event_handler(int event, void *ptr, int port);
 
 private:
   bx_uhci_core_c *uhci[3];
@@ -419,6 +419,7 @@ private:
   void runtime_config(void);
 
   static Bit64s usb_param_handler(bx_param_c *param, bool set, Bit64s val);
+  static Bit64s usb_param_oc_handler(bx_param_c *param, bool set, Bit64s val);
   static bool usb_param_enable_handler(bx_param_c *param, bool en);
 };
 

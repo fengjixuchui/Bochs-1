@@ -344,6 +344,7 @@ enum { PLS_U0 = 0, PLS_U1, PLS_U2, PLS_U3_SUSPENDED, PLS_DISABLED, PLS_RXDETECT,
 #define TRB_GET_TARGET(x)    (((x) & (0x3FF << 22)) >> 22)
 #define TRB_GET_TX_LEN(x)     ((x) & 0x1FFFF)
 #define TRB_GET_TOGGLE(x)    (((x) & (1<<1)) >> 1)
+#define TRB_GET_STREAM(x)    (((x) & (0xFFFF << 16)) >> 16)
 
 #define TRB_DC(x)            (((x) & (1<<9)) >> 9)
 #define TRB_IS_IMMED_DATA(x) (((x) & (1<<6)) >> 6)
@@ -600,7 +601,7 @@ public:
 
   virtual void pci_write_handler(Bit8u address, Bit32u value, unsigned io_len);
 
-  void event_handler(int event, USBPacket *packet, int port);
+  int event_handler(int event, void *ptr, int port);
 
 private:
   bx_usb_xhci_t hub;
@@ -620,7 +621,7 @@ private:
 
   static void init_device(Bit8u port, bx_list_c *portconf);
   static void remove_device(Bit8u port);
-  static bool usb_set_connect_status(Bit8u port, bool connected);
+  static bool set_connect_status(Bit8u port, bool connected);
 
   static int  broadcast_speed(const int slot);
   static int  broadcast_packet(USBPacket *p, const int port);
@@ -668,6 +669,7 @@ private:
   void runtime_config(void);
 
   static Bit64s usb_param_handler(bx_param_c *param, bool set, Bit64s val);
+  static Bit64s usb_param_oc_handler(bx_param_c *param, bool set, Bit64s val);
   static bool usb_param_enable_handler(bx_param_c *param, bool en);
 };
 

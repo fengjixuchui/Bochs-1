@@ -123,7 +123,7 @@ static inline struct EHCIPacket *ehci_container_of_usb_packet(void *ptr)
     reinterpret_cast<size_t>(&(static_cast<struct EHCIPacket*>(0)->packet)));
 }
 
-void ehci_event_handler(int event, USBPacket *packet, void *dev, int port);
+int ehci_event_handler(int event, void *ptr, void *dev, int port);
 
 // builtin configuration handling functions
 
@@ -194,7 +194,7 @@ bx_usb_ehci_c::bx_usb_ehci_c()
 
 bx_usb_ehci_c::~bx_usb_ehci_c()
 {
-  char pname[16];
+  char pname[32];
   int i;
 
   SIM->unregister_runtime_config_handler(rt_conf_id);
@@ -209,6 +209,8 @@ bx_usb_ehci_c::~bx_usb_ehci_c()
     SIM->get_param_enum(pname, SIM->get_param(BXPN_USB_EHCI))->set_handler(NULL);
     sprintf(pname, "port%d.options", i+1);
     SIM->get_param_string(pname, SIM->get_param(BXPN_USB_EHCI))->set_enable_handler(NULL);
+    sprintf(pname, "port%d.over_current", i+1);
+    SIM->get_param_bool(pname, SIM->get_param(BXPN_USB_EHCI))->set_handler(NULL);
     remove_device(i);
   }
 
@@ -225,7 +227,14 @@ void bx_usb_ehci_c::init(void)
   bx_list_c *ehci, *port;
   bx_param_enum_c *device;
   bx_param_string_c *options;
+  bx_param_bool_c *over_current;
   Bit8u devfunc;
+  
+  /*  If you wish to set DEBUG=report in the code, instead of
+   *  in the configuration, simply uncomment this line.  I use
+   *  it when I am working on this emulation.
+   */
+  //LOG_THIS setonoff(LOGLEV_DEBUG, ACT_REPORT);
 
   // Read in values from config interface
   ehci = (bx_list_c*) SIM->get_param(BXPN_USB_EHCI);
@@ -283,6 +292,8 @@ void bx_usb_ehci_c::init(void)
     device->set_handler(usb_param_handler);
     options = (bx_param_string_c*)port->get_by_name("options");
     options->set_enable_handler(usb_param_enable_handler);
+    over_current = (bx_param_bool_c*)port->get_by_name("over_current");
+    over_current->set_handler(usb_param_oc_handler);
     BX_EHCI_THIS hub.usb_port[i].device = NULL;
     BX_EHCI_THIS hub.usb_port[i].owner_change = 0;
     BX_EHCI_THIS hub.usb_port[i].portsc.ccs = 0;
@@ -521,7 +532,7 @@ void bx_usb_ehci_c::init_device(Bit8u port, bx_list_c *portconf)
   if (BX_EHCI_THIS hub.usb_port[port].device != NULL) {
     return;
   }
-  if (DEV_usb_init_device(portconf, BX_EHCI_THIS_PTR, &BX_EHCI_THIS hub.usb_port[port].device)) {
+  if (DEV_usb_init_device(portconf, BX_EHCI_THIS_PTR, &BX_EHCI_THIS hub.usb_port[port].device, ehci_event_handler, port)) {
     if (set_connect_status(port, 1)) {
       portconf->get_by_name("options")->set_enabled(0);
       sprintf(pname, "usb_ehci.hub.port%d.device", port+1);
@@ -530,6 +541,7 @@ void bx_usb_ehci_c::init_device(Bit8u port, bx_list_c *portconf)
     } else {
       ((bx_param_enum_c*)portconf->get_by_name("device"))->set_by_name("none");
       ((bx_param_string_c*)portconf->get_by_name("options"))->set("none");
+      ((bx_param_bool_c*)portconf->get_by_name("over_current"))->set(0);
       set_connect_status(port, 0);
     }
   }
@@ -588,7 +600,6 @@ bool bx_usb_ehci_c::set_connect_status(Bit8u port, bool connected)
           BX_INFO(("port #%d: connect: %s", port+1, device->get_info()));
         }
       }
-      device->set_event_handler(BX_EHCI_THIS_PTR, ehci_event_handler, port);
     } else { // not connected
       BX_INFO(("port #%d: device disconnect", port+1));
       if (BX_EHCI_THIS hub.usb_port[port].portsc.po) {
@@ -1275,36 +1286,57 @@ void bx_usb_ehci_c::finish_transfer(EHCIQueue *q, int status)
   }
 }
 
-void ehci_event_handler(int event, USBPacket *packet, void *dev, int port)
+int ehci_event_handler(int event, void *ptr, void *dev, int port)
 {
-  ((bx_usb_ehci_c*)dev)->event_handler(event, packet, port);
+  if (dev != NULL) {
+    return ((bx_usb_ehci_c*)dev)->event_handler(event, ptr, port);
+  }
+  return -1;
 }
 
-void bx_usb_ehci_c::event_handler(int event, USBPacket *packet, int port)
+int bx_usb_ehci_c::event_handler(int event, void *ptr, int port)
 {
+  USBPacket *packet = (USBPacket *) ptr;
   EHCIPacket *p;
+  int ret = 0;
 
-  if (event == USB_EVENT_ASYNC) {
-    BX_DEBUG(("Experimental async packet completion"));
-    p = ehci_container_of_usb_packet(packet);
-    if (p->pid == USB_TOKEN_IN) {
-      BX_EHCI_THIS transfer(p);
-    }
-    BX_ASSERT(p->async == EHCI_ASYNC_INFLIGHT);
-    p->async = EHCI_ASYNC_FINISHED;
-    p->usb_status = packet->len;
+  switch (event) {
+    // packet events start here
+    case USB_EVENT_ASYNC:
+      BX_DEBUG(("Experimental async packet completion"));
+      p = ehci_container_of_usb_packet(ptr);
+      if (p->pid == USB_TOKEN_IN) {
+        BX_EHCI_THIS transfer(p);
+      }
+      BX_ASSERT(p->async == EHCI_ASYNC_INFLIGHT);
+      p->async = EHCI_ASYNC_FINISHED;
+      p->usb_status = packet->len;
 
-    if (p->queue->async) {
-      BX_EHCI_THIS advance_async_state();
-    }
-  } else if (event == USB_EVENT_WAKEUP) {
-    if (BX_EHCI_THIS hub.usb_port[port].portsc.sus) {
-      BX_EHCI_THIS hub.usb_port[port].portsc.fpr = 1;
-      raise_irq(USBSTS_PCD);
-    }
-  } else {
-    BX_ERROR(("unknown/unsupported event (id=%d) on port #%d", event, port+1));
+      if (p->queue->async) {
+        BX_EHCI_THIS advance_async_state();
+      }
+      break;
+    case USB_EVENT_WAKEUP:
+      if (BX_EHCI_THIS hub.usb_port[port].portsc.sus) {
+        BX_EHCI_THIS hub.usb_port[port].portsc.fpr = 1;
+        raise_irq(USBSTS_PCD);
+      }
+      break;
+
+    // host controller events start here
+    case USB_EVENT_CHECK_SPEED:
+      if (ptr != NULL) {
+        usb_device_c *usb_device = (usb_device_c *) ptr;
+        if (usb_device->get_speed() <= USB_SPEED_HIGH)
+          ret = 1;
+      }
+      break;
+    default:
+      BX_ERROR(("unknown/unsupported event (id=%d) on port #%d", event, port+1));
+      ret = -1; // unknown event, event not handled
   }
+
+  return ret;
 }
 
 void bx_usb_ehci_c::execute_complete(EHCIQueue *q)
@@ -1369,6 +1401,15 @@ int bx_usb_ehci_c::execute(EHCIPacket *p)
 {
   int ret;
   int endp;
+
+  // if we remove the device, or signal an over-current, there is a possibility 
+  //  that 'dev' is NULL. simply return that we transfered zero bytes.
+  // ( we can't return USB_RET_PROCERR, since this code will then reset the HC.
+  //  On an over-current, we don't want the HC to reset... )
+  if (p->queue->dev == NULL) {
+    BX_DEBUG(("Attempting to execute a packet with no device attached."));
+    return 0;
+  }
 
   BX_ASSERT(p->async == EHCI_ASYNC_NONE ||
            p->async == EHCI_ASYNC_INITIALIZED);
@@ -2327,6 +2368,32 @@ Bit64s bx_usb_ehci_c::usb_param_handler(bx_param_c *param, bool set, Bit64s val)
     }
   }
   return val;
+}
+
+// USB runtime parameter handler: over-current
+Bit64s bx_usb_ehci_c::usb_param_oc_handler(bx_param_c *param, bool set, Bit64s val)
+{
+  int portnum;
+
+  if (set && val) {
+    portnum = atoi((param->get_parent())->get_name()+4) - 1;
+    if ((portnum >= 0) && (portnum < USB_EHCI_PORTS)) {
+      if (BX_EHCI_THIS hub.usb_port[portnum].portsc.ccs) {
+        // EHCI, section 4.2.5, page 58
+        BX_EHCI_THIS hub.usb_port[portnum].portsc.occ = 1;
+        BX_EHCI_THIS hub.usb_port[portnum].portsc.oca = 1;
+        BX_EHCI_THIS hub.usb_port[portnum].portsc.pec = 1;
+        BX_EHCI_THIS hub.usb_port[portnum].portsc.ped = 0;
+        BX_EHCI_THIS hub.usb_port[portnum].portsc.pp = 0; // optional (the HC may leave power on, limiting the current)
+        BX_DEBUG(("Over-current signaled on port #%d.", portnum + 1));
+        BX_EHCI_THIS raise_irq(USBSTS_PCD);
+      }
+    } else {
+      BX_ERROR(("Over-current: Bad portnum given: %d", portnum + 1));
+    }
+  }
+
+  return 0; // clear the indicator for next time
 }
 
 // USB runtime parameter enable handler

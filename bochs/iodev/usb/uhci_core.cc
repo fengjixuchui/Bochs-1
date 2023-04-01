@@ -166,7 +166,7 @@ void bx_uhci_core_c::reset_uhci(unsigned type)
     hub.usb_port[j].resume = 0;
     hub.usb_port[j].suspend = 0;
     hub.usb_port[j].over_current_change = 0;
-    hub.usb_port[j].over_current = 1;
+    hub.usb_port[j].over_current = 0;
     hub.usb_port[j].enabled = 0;
     hub.usb_port[j].enable_changed = 0;
     hub.usb_port[j].status = 0;
@@ -564,7 +564,7 @@ void bx_uhci_core_c::write(Bit32u address, Bit32u value, unsigned io_len)
         if (hub.usb_port[port].reset) {
           hub.usb_port[port].suspend = 0;
           hub.usb_port[port].over_current_change = 0;
-          hub.usb_port[port].over_current = 1;
+          hub.usb_port[port].over_current = 0;
           hub.usb_port[port].resume = 0;
           hub.usb_port[port].enabled = 0;
           // are we are currently connected/disconnected
@@ -645,7 +645,7 @@ void bx_uhci_core_c::uhci_timer(void)
       hub.usb_port[i].reset = 0;
       hub.usb_port[i].resume = 0;
       hub.usb_port[i].status = 0;
-      hub.usb_port[i].over_current = 1;
+      hub.usb_port[i].over_current = 0;
       hub.usb_port[i].over_current_change = 0;
       hub.usb_port[i].suspend = 0;
     }
@@ -734,10 +734,14 @@ void bx_uhci_core_c::uhci_timer(void)
           const int r_actlen = (((td.dword1 & 0x7FF) + 1) & 0x7FF);
           const int r_maxlen = (((td.dword2 >> 21) + 1) & 0x7FF);
           BX_DEBUG((" r_actlen = %d r_maxlen = %d", r_actlen, r_maxlen));
-          if (((td.dword2 & 0xFF) == USB_TOKEN_IN) && spd && (queue_addr != 0) && (r_actlen < r_maxlen) && ((td.dword1 & 0x00FF0000) == 0)) {
-            BX_DEBUG(("Short Packet Detected"));
-            shortpacket = was_short = 1;
-            td.dword1 |= (1<<29);
+          if (((td.dword2 & 0xFF) == USB_TOKEN_IN) && (queue_addr != 0) && (r_actlen < r_maxlen) && ((td.dword1 & 0x00FF0000) == 0)) {
+            if (spd) {
+              BX_DEBUG(("Short Packet Detected"));
+              shortpacket = was_short = 1;
+              td.dword1 |= (1<<29);
+            } else {
+              BX_DEBUG(("A Short Packet was detected, but the SPD bit in DWORD1 was clear"));
+            }
           }
           if (td.dword1 & (1<<22)) stalled = was_stall = 1;
           
@@ -748,7 +752,7 @@ void bx_uhci_core_c::uhci_timer(void)
           td_count++;
           
           // The UHCI (USB 1.1) only allows so many bytes to be transfered per frame.
-          // Due to control/bulk reclamation, we need to catch this and stop transfering 
+          // Due to control/bulk reclamation, we need to catch this and stop transferring 
           //  or this code will just keep processing TDs.
           bytes_processed += r_actlen;
           if (bytes_processed >= hub.max_bandwidth) {
@@ -831,35 +835,55 @@ void bx_uhci_core_c::uhci_timer(void)
   //    However, since we don't do anything, let's not.
 }
 
-void uhci_event_handler(int event, USBPacket *packet, void *dev, int port)
+int uhci_event_handler(int event, void *ptr, void *dev, int port)
 {
   if (dev != NULL) {
-    ((bx_uhci_core_c *) dev)->event_handler(event, packet, port);
+    return ((bx_uhci_core_c *) dev)->event_handler(event, ptr, port);
   }
+  return -1;
 }
 
-void bx_uhci_core_c::event_handler(int event, USBPacket *packet, int port)
+int bx_uhci_core_c::event_handler(int event, void *ptr, int port)
 {
-  if (event == USB_EVENT_ASYNC) {
-    BX_DEBUG(("Async packet completion"));
-    USBAsync *p = container_of_usb_packet(packet);
-    p->done = 1;
-  } else if (event == USB_EVENT_WAKEUP) {
-    if (hub.usb_port[port].suspend && !hub.usb_port[port].resume) {
-      hub.usb_port[port].resume = 1;
-    }
-    // if in suspend state, signal resume
-    if (hub.usb_command.suspend) {
-      hub.usb_command.resume = 1;
-      hub.usb_status.resume = 1;
-      if (hub.usb_enable.resume) {
-        hub.usb_status.interrupt = 1;
+  int ret = 0;
+  USBAsync *p;
+
+  switch (event) {
+    // packet events start here
+    case USB_EVENT_ASYNC:
+      BX_DEBUG(("Async packet completion"));
+      p = container_of_usb_packet(ptr);
+      p->done = 1;
+      break;
+    case USB_EVENT_WAKEUP:
+      if (hub.usb_port[port].suspend && !hub.usb_port[port].resume) {
+        hub.usb_port[port].resume = 1;
       }
-      update_irq();
-    }
-  } else {
-    BX_ERROR(("unknown/unsupported event (id=%d) on port #%d", event, port+1));
+      // if in suspend state, signal resume
+      if (hub.usb_command.suspend) {
+        hub.usb_command.resume = 1;
+        hub.usb_status.resume = 1;
+        if (hub.usb_enable.resume) {
+          hub.usb_status.interrupt = 1;
+        }
+        update_irq();
+      }
+      break;
+
+    // host controller events start here
+    case USB_EVENT_CHECK_SPEED:
+      if (ptr != NULL) {
+        usb_device_c *usb_device = (usb_device_c *) ptr;
+        if (usb_device->get_speed() <= USB_SPEED_FULL)
+          ret = 1;
+      }
+      break;
+    default:
+      BX_ERROR(("unknown/unsupported event (id=%d) on port #%d", event, port+1));
+      ret = -1; // unknown event, event not handled
   }
+  
+  return ret;
 }
 
 bool bx_uhci_core_c::DoTransfer(Bit32u address, struct TD *td) {
@@ -1036,11 +1060,12 @@ void bx_uhci_core_c::pci_write_handler(Bit8u address, Bit32u value, unsigned io_
   }
 }
 
+// these must match USB_SPEED_*
 const char *usb_speed[4] = {
-  "low",
-  "full",
-  "high",
-  "super"
+  "low",     // USB_SPEED_LOW   = 0
+  "full",    // USB_SPEED_FULL  = 1
+  "high",    // USB_SPEED_HIGH  = 2
+  "super"    // USB_SPEED_SUPER = 3
 };
 
 bool bx_uhci_core_c::set_connect_status(Bit8u port, bool connected)
@@ -1092,7 +1117,6 @@ bool bx_uhci_core_c::set_connect_status(Bit8u port, bool connected)
           BX_INFO(("port #%d: connect: %s", port+1, device->get_info()));
         }
       }
-      device->set_event_handler(this, uhci_event_handler, port);
     } else {
       BX_INFO(("port #%d: device disconnect", port+1));
       hub.usb_port[port].status = 0;

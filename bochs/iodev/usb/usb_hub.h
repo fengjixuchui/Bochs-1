@@ -51,7 +51,7 @@ public:
   virtual void after_restore_state();
   virtual void runtime_config();
   void restore_handler(bx_list_c *conf);
-  void event_handler(int event, USBPacket *packet, int port);
+  int event_handler(int event, void *ptr, int port);
 
 private:
   struct {
@@ -77,6 +77,7 @@ private:
 
   static Bit64s hub_param_handler(bx_param_c *param, bool set, Bit64s val);
   static bool hub_param_enable_handler(bx_param_c *param, bool en);
+  static Bit64s hub_param_oc_handler(bx_param_c *param, bool set, Bit64s val);
 };
 
 #endif
